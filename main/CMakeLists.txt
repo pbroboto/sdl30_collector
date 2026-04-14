@@ -1,0 +1,24 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "settings.c"
+        "sdl30/sdl30.c"
+        "survey/survey.c"
+        "survey/job.c"
+        "storage/storage.c"
+        "web/web_server.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        driver
+        esp_common
+        esp_wifi
+        esp_http_server
+        esp_netif
+        esp_event
+        nvs_flash
+        spiffs
+        freertos
+        log
+        json
+)
