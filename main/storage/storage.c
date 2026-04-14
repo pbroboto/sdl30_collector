@@ -30,9 +30,9 @@ esp_err_t storage_init(void)
     }
     size_t total = 0, used = 0;
     esp_spiffs_info(NULL, &total, &used);
-    ESP_LOGI(TAG, "SPIFFS: %luKB total  %luKB used  %luKB free",
-             (unsigned long)(total/1024), (unsigned long)(used/1024),
-             (unsigned long)((total-used)/1024));
+    ESP_LOGI(TAG, "SPIFFS: %uKB total  %uKB used  %uKB free",
+             (unsigned)(total/1024), (unsigned)(used/1024),
+             (unsigned)((total-used)/1024));
     return ESP_OK;
 }
 
@@ -48,8 +48,8 @@ esp_err_t storage_save_meta(const job_t *job)
     snprintf(path, sizeof(path), "%s/%s.meta", SPIFFS_BASE, job->name);
     FILE *f = fopen(path, "w");
     if (!f) return ESP_FAIL;
-    fprintf(f, "bench_rl=%.4f\npoint_count=%lu\n",
-            job->bench_rl, (unsigned long)job->point_count);
+    fprintf(f, "bench_rl=%.4f\npoint_count=%u\n",
+            job->bench_rl, (unsigned)job->point_count);
     fclose(f);
     return ESP_OK;
 }
@@ -62,9 +62,9 @@ esp_err_t storage_load_meta(job_t *job)
     if (!f) return ESP_FAIL;
     char line[64];
     while (fgets(line, sizeof(line), f)) {
-        float fv; uint32_t uv;
+        float fv; unsigned uv;
         if (sscanf(line, "bench_rl=%f",    &fv) == 1) job->bench_rl    = fv;
-        if (sscanf(line, "point_count=%lu", &uv) == 1) job->point_count = uv;
+        if (sscanf(line, "point_count=%u", &uv) == 1) job->point_count = uv;
     }
     fclose(f);
     return ESP_OK;
@@ -80,7 +80,7 @@ esp_err_t storage_append_record(const job_t *job, const record_t *r)
     fseek(f, 0, SEEK_END);
     if (ftell(f) == 0) fprintf(f, CSV_HEADER);
     fprintf(f, "%lu,%s,%+.4f,%.3f,%.4f,%.4f,%s\n",
-            r->index, sight_str(r->sight),
+            (unsigned long)r->index, sight_str(r->sight),
             r->staff, r->distance, r->hi, r->rl,
             r->voided ? "VOID" : "OK");
     fclose(f);
@@ -100,12 +100,12 @@ esp_err_t storage_rewrite_csv(const job_t *job,
         const record_t *r = &recs[i];
         if (!r->valid) continue;
         fprintf(f, "%lu,%s,%+.4f,%.3f,%.4f,%.4f,%s\n",
-                r->index, sight_str(r->sight),
+                (unsigned long)r->index, sight_str(r->sight),
                 r->staff, r->distance, r->hi, r->rl,
                 r->voided ? "VOID" : "OK");
     }
     fclose(f);
-    ESP_LOGI(TAG, "Rewrote %s (%lu records)", path, (unsigned long)count);
+    ESP_LOGI(TAG, "Rewrote %s (%u records)", path, (unsigned)count);
     return ESP_OK;
 }
 
@@ -139,7 +139,7 @@ uint32_t storage_load_records(const job_t *job,
         }
     }
     fclose(f);
-    ESP_LOGI(TAG, "Loaded %lu records from %s", (unsigned long)count, path);
+    ESP_LOGI(TAG, "Loaded %u records from %s", (unsigned)count, path);
     return count;
 }
 
@@ -152,7 +152,8 @@ int storage_list_jobs(char names[][MAX_JOB_NAME], int max_jobs)
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL && count < max_jobs) {
         char *dot = strrchr(ent->d_name, '.');
-        if (dot && strcmp(dot, ".csv") == 0) {
+        // Use .meta as the canonical job marker
+        if (dot && strcmp(dot, ".meta") == 0) {
             size_t nlen = dot - ent->d_name;
             if (nlen >= MAX_JOB_NAME) nlen = MAX_JOB_NAME - 1;
             strncpy(names[count], ent->d_name, nlen);

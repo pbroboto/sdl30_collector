@@ -22,6 +22,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 static const char *TAG = "WEB";
 static httpd_handle_t s_httpd = NULL;
@@ -122,12 +124,12 @@ static esp_err_t h_root(httpd_req_t *req)
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
     // Send large HTML in chunks to avoid stack overflow
-    size_t len = strlen(WEB_UI_HTML);
+    static const size_t html_len = sizeof(WEB_UI_HTML) - 1;
     size_t offset = 0;
-    size_t chunk = 4096;
-    while (offset < len) {
-        size_t send_len = (len - offset) > chunk ? chunk : (len - offset);
-        httpd_resp_send_chunk(req, WEB_UI_HTML + offset, send_len);
+    const size_t chunk = 2048;
+    while (offset < html_len) {
+        size_t send_len = (html_len - offset) > chunk ? chunk : (html_len - offset);
+        httpd_resp_send_chunk(req, WEB_UI_HTML + offset, (ssize_t)send_len);
         offset += send_len;
     }
     httpd_resp_send_chunk(req, NULL, 0);
@@ -385,7 +387,7 @@ static esp_err_t h_download(httpd_req_t *req)
             strncpy(jobname, tmp, sizeof(jobname)-1);
     }
 
-    char path[80];
+    char path[320];
     snprintf(path, sizeof(path), "%s/%s.csv", SPIFFS_BASE, jobname);
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -534,6 +536,39 @@ static void wifi_init(void)
     ESP_LOGI(TAG, "WiFi AP: SSID=%s  IP=%s", WIFI_AP_SSID, WIFI_AP_IP);
 }
 
+// ─── GET /api/files ─────────────────────────────────────────────────────────
+static esp_err_t h_files(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr_chunk(req, "{\"files\":[");
+    DIR *dir = opendir(SPIFFS_BASE);
+    bool first = true;
+    if (dir) {
+        struct dirent *ent;
+        while ((ent = readdir(dir)) != NULL) {
+            char path[320];
+            snprintf(path, sizeof(path), "%s/%s", SPIFFS_BASE, ent->d_name);
+            struct stat st;
+            size_t sz = (stat(path, &st) == 0) ? st.st_size : 0;
+            char row[320];
+            snprintf(row, sizeof(row), "%s{\"name\":\"%s\",\"size\":%lu}",
+                     first ? "" : ",", ent->d_name, (unsigned long)sz);
+            httpd_resp_sendstr_chunk(req, row);
+            first = false;
+        }
+        closedir(dir);
+    }
+    size_t tot = 0, used = 0;
+    storage_info(&tot, &used);
+    char tail[64];
+    snprintf(tail, sizeof(tail), "],\"total\":%lu,\"used\":%lu}",
+             (unsigned long)tot, (unsigned long)used);
+    httpd_resp_sendstr_chunk(req, tail);
+    httpd_resp_sendstr_chunk(req, NULL);
+    return ESP_OK;
+}
+
 // ─── Start server ─────────────────────────────────────────────────────────────
 esp_err_t web_server_start(void)
 {
@@ -545,6 +580,8 @@ esp_err_t web_server_start(void)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.max_uri_handlers = 20;
     cfg.stack_size = 16384;
+    cfg.send_wait_timeout = 30;
+    cfg.recv_wait_timeout = 30;
 
     if (httpd_start(&s_httpd, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "HTTP server start failed");
@@ -568,8 +605,9 @@ esp_err_t web_server_start(void)
         { "/api/record/delete", HTTP_POST, h_rec_delete,    NULL },
         { "/api/record/sight",  HTTP_POST, h_rec_sight,     NULL },
         { "/api/settings",      HTTP_POST, h_settings_post, NULL },
+        { "/api/files",         HTTP_GET,  h_files,         NULL },
     };
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 17; i++)
         httpd_register_uri_handler(s_httpd, &uris[i]);
 
     ESP_LOGI(TAG, "HTTP ready at http://%s", WIFI_AP_IP);
