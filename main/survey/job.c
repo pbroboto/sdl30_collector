@@ -19,20 +19,52 @@ static uint32_t         s_count = 0;
 static SemaphoreHandle_t s_mtx  = NULL;
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
+static void update_current_from_records(void);
+#define ACTIVE_JOB_FILE SPIFFS_BASE "/active_job.txt"
+
+static void save_active_job_name(void)
+{
+    FILE *f = fopen(ACTIVE_JOB_FILE, "w");
+    if (!f) return;
+    fprintf(f, "%s\n", s_job.name);
+    fclose(f);
+}
+
+static void load_active_job_name(char *name, size_t len)
+{
+    FILE *f = fopen(ACTIVE_JOB_FILE, "r");
+    if (!f) { strncpy(name, "JOB_001", len-1); return; }
+    if (!fgets(name, len, f)) strncpy(name, "JOB_001", len-1);
+    // Strip newline
+    for (int i = strlen(name)-1; i >= 0; i--)
+        if (name[i] == '\n' || name[i] == '\r') name[i] = '\0';
+    fclose(f);
+}
+
 esp_err_t job_init(void)
 {
     s_mtx = xSemaphoreCreateMutex();
     memset(&s_job, 0, sizeof(s_job));
     memset(s_records, 0, sizeof(s_records));
 
-    strncpy(s_job.name, "JOB_001", MAX_JOB_NAME - 1);
+    // Try to restore last active job from SPIFFS
+    char last_name[MAX_JOB_NAME] = {0};
+    load_active_job_name(last_name, sizeof(last_name));
+    strncpy(s_job.name, last_name, MAX_JOB_NAME - 1);
     s_job.bench_rl   = 100.000f;
     s_job.current_hi = 100.000f;
     s_job.current_rl = 100.000f;
     s_count = 0;
 
-    ESP_LOGI(TAG, "Job module ready. Default: %s BM=%.3f",
-             s_job.name, s_job.bench_rl);
+    // Load meta and records from SPIFFS
+    if (storage_load_meta(&s_job) == ESP_OK) {
+        s_count = storage_load_records(&s_job, s_records, MAX_POINTS);
+        update_current_from_records();
+        ESP_LOGI(TAG, "Restored job: %s  BM=%.4f  %lu records",
+                 s_job.name, s_job.bench_rl, (unsigned long)s_count);
+    } else {
+        ESP_LOGI(TAG, "No saved job found — using default: %s", s_job.name);
+    }
     return ESP_OK;
 }
 
@@ -69,6 +101,7 @@ esp_err_t job_new(const char *name, float bench_rl)
     xSemaphoreGive(s_mtx);
 
     storage_save_meta(&s_job);
+    save_active_job_name();
     ESP_LOGI(TAG, "New job: %s  BM=%.4f", name, bench_rl);
     return ESP_OK;
 }
@@ -89,7 +122,8 @@ esp_err_t job_select(const char *name)
     update_current_from_records();
     xSemaphoreGive(s_mtx);
 
-    ESP_LOGI(TAG, "Selected job: %s  %lu points  BM=%.4f", 
+    save_active_job_name();
+    ESP_LOGI(TAG, "Selected job: %s  %lu records  BM=%.4f",
              name, (unsigned long)s_count, s_job.bench_rl);
     return ESP_OK;
 }
@@ -176,7 +210,7 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
     storage_save_meta(&s_job);
 
     ESP_LOGI(TAG, "Added #%lu [%s] staff=%.4f dist=%.3f RL=%.4f",
-             r.index, sight_str(sight), staff, distance, rl);
+             (unsigned long)r.index, sight_str(sight), staff, distance, rl);
     return ESP_OK;
 }
 
@@ -211,7 +245,7 @@ esp_err_t job_delete_point(uint32_t index)
 
     storage_rewrite_csv(&s_job, s_records, s_count);
     storage_save_meta(&s_job);
-    ESP_LOGI(TAG, "Deleted point #%lu — %lu points remain", index, s_count);
+    ESP_LOGI(TAG, "Deleted point #%lu — %lu records remain", (unsigned long)index, (unsigned long)s_count);
     return ESP_OK;
 }
 
@@ -236,7 +270,7 @@ esp_err_t job_edit_sight(uint32_t index, sight_type_t new_sight)
     if (!found) return ESP_ERR_NOT_FOUND;
 
     storage_rewrite_csv(&s_job, s_records, s_count);
-    ESP_LOGI(TAG, "Point #%lu sight changed to %s", index, sight_str(new_sight));
+    ESP_LOGI(TAG, "Point #%lu sight changed to %s", (unsigned long)index, sight_str(new_sight));
     return ESP_OK;
 }
 

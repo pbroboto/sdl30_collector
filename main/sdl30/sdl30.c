@@ -42,6 +42,18 @@ esp_err_t sdl30_init(void)
                                   UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
     ESP_LOGI(TAG, "UART%d ready @ %d baud  RX=GPIO%d TX=GPIO%d",
              SDL_UART_NUM, SDL_BAUD, SDL_GPIO_RX, SDL_GPIO_TX);
+
+    // Set Single measurement mode (LXa)
+    char buf[16];
+    vTaskDelay(pdMS_TO_TICKS(200));
+    sdl30_raw_cmd("LXa\r", buf, sizeof(buf));
+    ESP_LOGI(TAG, "LXa (Single mode): %s", buf);
+
+    // Set display resolution to 0.0001m (L/B 0,0)
+    vTaskDelay(pdMS_TO_TICKS(200));
+    sdl30_raw_cmd("L/B 0,0\r", buf, sizeof(buf));
+    ESP_LOGI(TAG, "L/B 0,0 (0.0001m resolution): %s", buf);
+
     return ESP_OK;
 }
 

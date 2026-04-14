@@ -121,7 +121,16 @@ static esp_err_t h_root(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-    httpd_resp_sendstr(req, WEB_UI_HTML);
+    // Send large HTML in chunks to avoid stack overflow
+    size_t len = strlen(WEB_UI_HTML);
+    size_t offset = 0;
+    size_t chunk = 4096;
+    while (offset < len) {
+        size_t send_len = (len - offset) > chunk ? chunk : (len - offset);
+        httpd_resp_send_chunk(req, WEB_UI_HTML + offset, send_len);
+        offset += send_len;
+    }
+    httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
 }
 
@@ -535,7 +544,7 @@ esp_err_t web_server_start(void)
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.max_uri_handlers = 20;
-    cfg.stack_size = 8192;
+    cfg.stack_size = 16384;
 
     if (httpd_start(&s_httpd, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "HTTP server start failed");
