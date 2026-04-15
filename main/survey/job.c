@@ -102,6 +102,8 @@ esp_err_t job_new(const char *name, float bench_rl)
 
     storage_save_meta(&s_job);
     save_active_job_name();
+    // Create empty CSV so job appears in list
+    storage_rewrite_csv(&s_job, NULL, 0);
     ESP_LOGI(TAG, "New job: %s  BM=%.4f", name, bench_rl);
     return ESP_OK;
 }
@@ -180,10 +182,14 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
 
     switch (sight) {
         case SIGHT_BS:
+        case SIGHT_BS1:
+        case SIGHT_BS2:
             hi = rl + staff;
             break;
         case SIGHT_IS:
         case SIGHT_FS:
+        case SIGHT_FS1:
+        case SIGHT_FS2:
             rl = hi - staff;
             break;
     }
