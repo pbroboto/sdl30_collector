@@ -22,6 +22,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -43,6 +44,43 @@ static int s_next_sight = SIGHT_BS;
 
 int  web_get_next_sight(void) { return s_next_sight; }
 void web_set_next_sight(int s) { s_next_sight = s; }
+
+// ─── Double-reading state machine (BFFB/BFBF/BBFF) ──────────────────────────
+typedef enum {
+    DBLR_IDLE=0, DBLR_BS1, DBLR_FS1, DBLR_FS2, DBLR_BS2,
+    DBLR_PASS, DBLR_FAIL
+} dblr_step_t;
+
+typedef struct {
+    dblr_step_t step;
+    float bs1, bs1_dist, fs1, fs1_dist;
+    float fs2, fs2_dist, bs2, bs2_dist;
+    float dh1, dh2, diff_mm;
+    bool  passed;
+} dblr_state_t;
+
+static dblr_state_t s_dblr = {0};
+
+// Sight sequence for each method and step (0-3)
+// BFFB=1: BS FS FS BS
+// BFBF=2: BS FS BS FS
+// BBFF=3: BS BS FS FS
+// static const int dblr_seq[3][4] = {
+//     {SIGHT_BS, SIGHT_FS, SIGHT_FS, SIGHT_BS},  // BFFB
+//     {SIGHT_BS, SIGHT_FS, SIGHT_BS, SIGHT_FS},  // BFBF
+//     {SIGHT_BS, SIGHT_BS, SIGHT_FS, SIGHT_FS},  // BBFF
+// };
+static const char *dblr_labels[3][4] = {
+    {"BS1","FS1","FS2","BS2"},  // BFFB
+    {"BS1","FS1","BS2","FS2"},  // BFBF
+    {"BS1","BS2","FS1","FS2"},  // BBFF
+};
+
+static void dblr_reset(void) {
+    memset(&s_dblr, 0, sizeof(s_dblr));
+    s_dblr.step = DBLR_BS1;
+}
+
 
 // ─── JSON helpers ─────────────────────────────────────────────────────────────
 static bool json_str(const char *body, const char *key, char *out, size_t len)
@@ -123,16 +161,11 @@ static esp_err_t h_root(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-    // Send large HTML in chunks to avoid stack overflow
-    static const size_t html_len = sizeof(WEB_UI_HTML) - 1;
-    size_t offset = 0;
-    const size_t chunk = 2048;
-    while (offset < html_len) {
-        size_t send_len = (html_len - offset) > chunk ? chunk : (html_len - offset);
-        httpd_resp_send_chunk(req, WEB_UI_HTML + offset, (ssize_t)send_len);
-        offset += send_len;
-    }
-    httpd_resp_send_chunk(req, NULL, 0);
+    // Send full HTML page with explicit length
+    size_t html_sz = sizeof(WEB_UI_HTML) - 1;
+    ESP_LOGI(TAG, "Sending HTML: %lu bytes", (unsigned long)html_sz);
+    esp_err_t ret = httpd_resp_send(req, WEB_UI_HTML, html_sz);
+    ESP_LOGI(TAG, "HTML send result: %d", ret);
     return ESP_OK;
 }
 
@@ -143,18 +176,27 @@ static esp_err_t h_status(httpd_req_t *req)
     size_t tot = 0, used = 0;
     storage_info(&tot, &used);
 
-    char buf[320];
+    char buf[512];
+    int mi = s_settings.obs_method - 1;
+    if (mi < 0 || mi > 2) mi = 0;
+    const char *next_lbl = (s_settings.obs_method > 0 && s_dblr.step > 0 && s_dblr.step < 5)
+        ? dblr_labels[mi][(int)s_dblr.step % 4]
+        : sight_str((sight_type_t)s_next_sight);
     snprintf(buf, sizeof(buf),
         "{\"sdl_ok\":%s,\"model\":\"%s\",\"serial\":\"%s\","
         "\"job\":\"%s\",\"hi\":%.4f,\"rl\":%.4f,"
         "\"readings\":%lu,\"points\":%lu,\"bench_rl\":%.4f,"
-        "\"next_sight\":\"%s\","
+        "\"next_sight\":\"%s\",\"obs_method\":%d,"
+        "\"dblr_step\":%d,\"dblr_passed\":%s,\"dblr_diff_mm\":%.3f,"
         "\"flash_total\":%lu,\"flash_used\":%lu}",
         g_sdl_ok ? "true" : "false",
         g_sdl_model, g_sdl_serial,
         job->name, job->current_hi, job->current_rl,
         (unsigned long)job_get_count(), (unsigned long)(job_get_fs_count()+1), job->bench_rl,
-        sight_str((sight_type_t)s_next_sight),
+        next_lbl, s_settings.obs_method,
+        (int)s_dblr.step,
+        s_dblr.passed ? "true" : "false",
+        s_dblr.diff_mm,
         (unsigned long)tot, (unsigned long)used);
     send_json(req, buf);
     return ESP_OK;
@@ -233,42 +275,118 @@ static esp_err_t h_jobs(httpd_req_t *req)
 // ─── POST /api/measure ────────────────────────────────────────────────────────
 static esp_err_t h_measure(httpd_req_t *req)
 {
-    char body[64] = {0};
-    read_body(req, body, sizeof(body));
-    char sight_s[4] = "BS";
-    json_str(body, "sight", sight_s, sizeof(sight_s));
-    sight_type_t sight = sight_from_str(sight_s);
-
     float staff = 0.0f, distance = 0.0f;
     esp_err_t err = sdl30_measure(&staff, &distance);
 
     if (err != ESP_OK) {
         g_lm_timeouts++;
         ESP_LOGW(TAG, "LM failed (%d/%d)", g_lm_timeouts, SDL_LM_TIMEOUT_MAX);
-        send_err(req, "SDL30 measurement failed — check staff and standby screen");
+        send_err(req, "SDL30 measurement failed");
         return ESP_OK;
     }
-
-    // Success — reset timeout counter
     g_lm_timeouts = 0;
     g_sdl_ok = true;
 
-    // Save to job
-    job_add_point(sight, staff, distance);
+    int method = s_settings.obs_method;
+
+    // ── BF mode (method=0) ────────────────────────────────────────────────
+    if (method == 0) {
+        char body[64] = {0};
+        read_body(req, body, sizeof(body));
+        char sight_s[4] = "BS";
+        json_str(body, "sight", sight_s, sizeof(sight_s));
+        sight_type_t sight = sight_from_str(sight_s);
+        job_add_point(sight, staff, distance);
+        const job_t *job = job_get_info();
+        if (sight == SIGHT_BS)      s_next_sight = SIGHT_FS;
+        else if (sight == SIGHT_FS) s_next_sight = SIGHT_BS;
+        char resp[256];
+        snprintf(resp, sizeof(resp),
+            "{\"ok\":true,\"mode\":\"BF\","
+            "\"index\":%lu,\"sight\":\"%s\","
+            "\"staff\":%.4f,\"distance\":%.3f,"
+            "\"hi\":%.4f,\"rl\":%.4f}",
+            (unsigned long)job_get_count(),
+            sight_str(sight), staff, distance,
+            job->current_hi, job->current_rl);
+        send_json(req, resp);
+        return ESP_OK;
+    }
+
+    // ── Double-reading mode (BFFB/BFBF/BBFF) ─────────────────────────────
+    int mi = method - 1;  // 0=BFFB, 1=BFBF, 2=BBFF
+    if (mi < 0 || mi > 2) mi = 0;
+
+    // Initialize if idle
+    if (s_dblr.step == DBLR_IDLE || s_dblr.step == DBLR_PASS || s_dblr.step == DBLR_FAIL)
+        dblr_reset();
+
+    // Store reading for current step
+    switch (s_dblr.step) {
+        case DBLR_BS1: s_dblr.bs1=staff; s_dblr.bs1_dist=distance; s_dblr.step=DBLR_FS1; break;
+        case DBLR_FS1: s_dblr.fs1=staff; s_dblr.fs1_dist=distance; s_dblr.step=DBLR_FS2; break;
+        case DBLR_FS2: s_dblr.fs2=staff; s_dblr.fs2_dist=distance; s_dblr.step=DBLR_BS2; break;
+        case DBLR_BS2:
+            s_dblr.bs2=staff; s_dblr.bs2_dist=distance;
+            // Calculate check
+            // For all methods: dh1=first_BS - first_FS, dh2=second_BS - second_FS
+            if (mi == 0) { // BFFB: BS1-FS1, BS2-FS2
+                s_dblr.dh1 = s_dblr.bs1 - s_dblr.fs1;
+                s_dblr.dh2 = s_dblr.bs2 - s_dblr.fs2;
+            } else if (mi == 1) { // BFBF: BS1-FS1, BS2-FS2
+                s_dblr.dh1 = s_dblr.bs1 - s_dblr.fs1;
+                s_dblr.dh2 = s_dblr.bs2 - s_dblr.fs2;
+            } else { // BBFF: BS1-FS1, BS2-FS2 (FS1=fs1, FS2=fs2)
+                s_dblr.dh1 = s_dblr.bs1 - s_dblr.fs1;
+                s_dblr.dh2 = s_dblr.bs2 - s_dblr.fs2;
+            }
+            s_dblr.diff_mm = fabsf(s_dblr.dh1 - s_dblr.dh2) * 1000.0f;
+            s_dblr.passed  = (s_dblr.diff_mm <= s_settings.max_station_mm);
+            s_dblr.step    = s_dblr.passed ? DBLR_PASS : DBLR_FAIL;
+
+            if (s_dblr.passed) {
+                // Save all 4 raw readings as BS1/FS1/FS2/BS2
+                job_add_point(SIGHT_BS1, s_dblr.bs1, s_dblr.bs1_dist);
+                job_add_point(SIGHT_FS1, s_dblr.fs1, s_dblr.fs1_dist);
+                job_add_point(SIGHT_FS2, s_dblr.fs2, s_dblr.fs2_dist);
+                job_add_point(SIGHT_BS2, s_dblr.bs2, s_dblr.bs2_dist);
+                ESP_LOGI(TAG, "%s PASS: diff=%.3fmm "
+                         "BS1=%.4f FS1=%.4f FS2=%.4f BS2=%.4f",
+                         obs_method_str(method), s_dblr.diff_mm,
+                         s_dblr.bs1, s_dblr.fs1, s_dblr.fs2, s_dblr.bs2);
+            } else {
+                ESP_LOGW(TAG, "%s FAIL: diff=%.3fmm > %.1fmm — repeat setup!",
+                         obs_method_str(method),
+                         s_dblr.diff_mm, s_settings.max_station_mm);
+            }
+            break;
+        default: dblr_reset(); break;
+    }
+
+    // Build response
     const job_t *job = job_get_info();
-
-    // Auto-advance sight type
-    if (sight == SIGHT_BS)      s_next_sight = SIGHT_FS;
-    else if (sight == SIGHT_FS) s_next_sight = SIGHT_BS;
-
-    char resp[256];
+    int cur_step = (int)s_dblr.step;
+    int step_num = (cur_step <= 4) ? cur_step : 4;
+    const char *lbl = (step_num > 0 && step_num <= 4) ?
+                      dblr_labels[mi][step_num-1] : "---";
+    char resp[512];
     snprintf(resp, sizeof(resp),
-        "{\"ok\":true,\"index\":%lu,\"sight\":\"%s\","
+        "{\"ok\":true,\"mode\":\"%s\","
+        "\"dblr_step\":%d,\"dblr_label\":\"%s\","
         "\"staff\":%.4f,\"distance\":%.3f,"
-        "\"hi\":%.4f,\"rl\":%.4f}",
-        (unsigned long)job_get_count(),
-        sight_str(sight), staff, distance,
-        job->current_hi, job->current_rl);
+        "\"bs1\":%.4f,\"fs1\":%.4f,\"fs2\":%.4f,\"bs2\":%.4f,"
+        "\"dh1\":%.4f,\"dh2\":%.4f,\"diff_mm\":%.3f,"
+        "\"passed\":%s,"
+        "\"hi\":%.4f,\"rl\":%.4f,"
+        "\"index\":%lu}",
+        obs_method_str(method),
+        (int)s_dblr.step, lbl,
+        staff, distance,
+        s_dblr.bs1, s_dblr.fs1, s_dblr.fs2, s_dblr.bs2,
+        s_dblr.dh1, s_dblr.dh2, s_dblr.diff_mm,
+        s_dblr.passed ? "true" : "false",
+        job->current_hi, job->current_rl,
+        (unsigned long)job_get_count());
     send_json(req, resp);
     return ESP_OK;
 }
@@ -551,7 +669,7 @@ static esp_err_t h_files(httpd_req_t *req)
             snprintf(path, sizeof(path), "%s/%s", SPIFFS_BASE, ent->d_name);
             struct stat st;
             size_t sz = (stat(path, &st) == 0) ? st.st_size : 0;
-            char row[320];
+            char row[512];
             snprintf(row, sizeof(row), "%s{\"name\":\"%s\",\"size\":%lu}",
                      first ? "" : ",", ent->d_name, (unsigned long)sz);
             httpd_resp_sendstr_chunk(req, row);
@@ -569,6 +687,15 @@ static esp_err_t h_files(httpd_req_t *req)
     return ESP_OK;
 }
 
+// ─── POST /api/dblr_repeat ───────────────────────────────────────────────────
+static esp_err_t h_dblr_repeat(httpd_req_t *req)
+{
+    dblr_reset();
+    ESP_LOGI(TAG, "DBLR: setup repeated by user");
+    send_ok(req);
+    return ESP_OK;
+}
+
 // ─── Start server ─────────────────────────────────────────────────────────────
 esp_err_t web_server_start(void)
 {
@@ -579,7 +706,7 @@ esp_err_t web_server_start(void)
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.max_uri_handlers = 20;
-    cfg.stack_size = 16384;
+    cfg.stack_size = 24576;
     cfg.send_wait_timeout = 30;
     cfg.recv_wait_timeout = 30;
 
@@ -606,8 +733,9 @@ esp_err_t web_server_start(void)
         { "/api/record/sight",  HTTP_POST, h_rec_sight,     NULL },
         { "/api/settings",      HTTP_POST, h_settings_post, NULL },
         { "/api/files",         HTTP_GET,  h_files,         NULL },
+        { "/api/dblr_repeat",   HTTP_POST, h_dblr_repeat,   NULL },
     };
-    for (int i = 0; i < 17; i++)
+    for (int i = 0; i < 18; i++)
         httpd_register_uri_handler(s_httpd, &uris[i]);
 
     ESP_LOGI(TAG, "HTTP ready at http://%s", WIFI_AP_IP);
