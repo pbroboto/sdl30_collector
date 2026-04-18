@@ -8,7 +8,7 @@
 #define SDL_BAUD            2400        // confirmed: 2400 works with SDL30
 #define SDL_GPIO_RX         GPIO_NUM_16 // SP3232EEN TTL TXD (white wire)
 #define SDL_GPIO_TX         GPIO_NUM_17 // SP3232EEN TTL RXD (green wire)
-#define SDL_TIMEOUT_MS      5000
+#define SDL_TIMEOUT_MS      15000
 #define SDL_UART_BUF        512
 #define SDL_LM_TIMEOUT_MAX  3           // send LA after this many LM timeouts
 

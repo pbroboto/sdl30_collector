@@ -64,6 +64,7 @@ esp_err_t job_delete_point(uint32_t index);
  * Triggers full RL recalculation and CSV rewrite.
  */
 esp_err_t job_edit_sight(uint32_t index, sight_type_t new_sight);
+esp_err_t job_edit_name(uint32_t index, const char *name);
 
 /**
  * Get pointer to active job info (read-only).

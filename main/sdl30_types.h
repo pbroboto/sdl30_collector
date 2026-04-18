@@ -42,6 +42,8 @@ static inline sight_type_t sight_from_str(const char *s) {
 }
 
 // ─── Single measurement record ────────────────────────────────────────────────
+#define MAX_POINT_NAME 24
+
 typedef struct {
     uint32_t     index;       // 1-based point number
     sight_type_t sight;       // BS / IS / FS
@@ -51,6 +53,7 @@ typedef struct {
     float        rl;          // Reduced Level (calculated)
     bool         voided;      // soft-delete flag
     bool         valid;       // true if slot is in use
+    char         name[MAX_POINT_NAME];   // point name e.g. "BM001", "TP042"
 } record_t;
 
 // ─── Job ──────────────────────────────────────────────────────────────────────

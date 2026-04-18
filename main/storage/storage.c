@@ -12,7 +12,7 @@
 
 static const char *TAG = "STORAGE";
 
-#define CSV_HEADER "Point,Sight,Staff(m),Distance(m),HI(m),RL(m),Status\n"
+#define CSV_HEADER "Point,Name,Sight,Staff(m),Distance(m),HI(m),RL(m),Status\n"
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 esp_err_t storage_init(void)
@@ -79,8 +79,8 @@ esp_err_t storage_append_record(const job_t *job, const record_t *r)
     if (!f) { ESP_LOGE(TAG, "Cannot open: %s", path); return ESP_FAIL; }
     fseek(f, 0, SEEK_END);
     if (ftell(f) == 0) fprintf(f, CSV_HEADER);
-    fprintf(f, "%lu,%s,%+.4f,%.3f,%.4f,%.4f,%s\n",
-            (unsigned long)r->index, sight_str(r->sight),
+    fprintf(f, "%lu,%s,%s,%+.4f,%.3f,%.4f,%.4f,%s\n",
+            (unsigned long)r->index, r->name, sight_str(r->sight),
             r->staff, r->distance, r->hi, r->rl,
             r->voided ? "VOID" : "OK");
     fclose(f);
@@ -99,8 +99,8 @@ esp_err_t storage_rewrite_csv(const job_t *job,
     for (uint32_t i = 0; i < count; i++) {
         const record_t *r = &recs[i];
         if (!r->valid) continue;
-        fprintf(f, "%lu,%s,%+.4f,%.3f,%.4f,%.4f,%s\n",
-                (unsigned long)r->index, sight_str(r->sight),
+        fprintf(f, "%lu,%s,%s,%+.4f,%.3f,%.4f,%.4f,%s\n",
+                (unsigned long)r->index, r->name, sight_str(r->sight),
                 r->staff, r->distance, r->hi, r->rl,
                 r->voided ? "VOID" : "OK");
     }
@@ -128,8 +128,8 @@ uint32_t storage_load_records(const job_t *job,
 
         record_t r = {0};
         char sight_s[4], status_s[8];
-        if (sscanf(line, "%lu,%3[^,],%f,%f,%f,%f,%7s",
-                   &r.index, sight_s,
+        if (sscanf(line, "%lu,%23[^,],%3[^,],%f,%f,%f,%f,%7s",
+                   (unsigned long*)&r.index, r.name, sight_s,
                    &r.staff, &r.distance,
                    &r.hi, &r.rl, status_s) == 7) {
             r.sight  = sight_from_str(sight_s);

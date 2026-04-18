@@ -217,13 +217,13 @@ static esp_err_t h_records(httpd_req_t *req)
     for (uint32_t i = 0; i < count; i++) {
         const record_t *r = &recs[i];
         if (!r->valid || r->voided) continue;
-        char row[200];
+        char row[320];
         snprintf(row, sizeof(row),
-            "%s{\"index\":%lu,\"sight\":\"%s\","
+            "%s{\"index\":%lu,\"name\":\"%s\",\"sight\":\"%s\","
             "\"staff\":%.4f,\"distance\":%.3f,"
             "\"hi\":%.4f,\"rl\":%.4f}",
             first ? "" : ",",
-            (unsigned long)r->index, sight_str(r->sight),
+            (unsigned long)r->index, r->name, sight_str(r->sight),
             r->staff, r->distance, r->hi, r->rl);
         httpd_resp_sendstr_chunk(req, row);
         first = false;
@@ -474,6 +474,42 @@ static esp_err_t h_rec_delete(httpd_req_t *req)
         send_err(req, "index required"); return ESP_OK;
     }
     esp_err_t err = job_delete_point((uint32_t)idx);
+
+    // Resync dblr state from remaining records
+    if (s_settings.obs_method >= 1 && s_settings.obs_method <= 3) {
+        job_lock();
+        const record_t *recs = job_get_records();
+        uint32_t count = job_get_count();
+        int has_bs1=0, has_fs1=0, has_fs2=0;
+        float bs1=0,fs1=0,fs2=0,bd=0;
+        // Scan last incomplete setup from end
+        for (int i=(int)count-1; i>=0; i--) {
+            if (!recs[i].valid || recs[i].voided) continue;
+            if (recs[i].sight==SIGHT_BS1 && !has_bs1) {
+                bs1=recs[i].staff; bd=recs[i].distance; has_bs1=1;
+            } else if (recs[i].sight==SIGHT_FS1 && !has_fs1) {
+                fs1=recs[i].staff; has_fs1=1;
+            } else if (recs[i].sight==SIGHT_FS2 && !has_fs2) {
+                fs2=recs[i].staff; has_fs2=1;
+            }
+        }
+        job_unlock();
+        dblr_reset();
+        if (has_bs1 && has_fs1 && has_fs2) {
+            s_dblr.step=DBLR_BS2;
+            s_dblr.bs1=bs1; s_dblr.bs1_dist=bd;
+            s_dblr.fs1=fs1; s_dblr.fs2=fs2;
+        } else if (has_bs1 && has_fs1) {
+            s_dblr.step=DBLR_FS2;
+            s_dblr.bs1=bs1; s_dblr.bs1_dist=bd; s_dblr.fs1=fs1;
+        } else if (has_bs1) {
+            s_dblr.step=DBLR_FS1;
+            s_dblr.bs1=bs1; s_dblr.bs1_dist=bd;
+        } else {
+            s_dblr.step=DBLR_BS1;  // no records - ready for first B
+        }
+        ESP_LOGI(TAG, "DBLR resync: step=%d", (int)s_dblr.step);
+    }
     err == ESP_OK ? send_ok(req) : send_err(req, "not found");
     return ESP_OK;
 }
@@ -489,6 +525,21 @@ static esp_err_t h_rec_sight(httpd_req_t *req)
         send_err(req, "params required"); return ESP_OK;
     }
     esp_err_t err = job_edit_sight((uint32_t)idx, sight_from_str(sight_s));
+    err == ESP_OK ? send_ok(req) : send_err(req, "not found");
+    return ESP_OK;
+}
+
+// ─── POST /api/record/name ────────────────────────────────────────────────────
+static esp_err_t h_rec_name(httpd_req_t *req)
+{
+    char body[128] = {0};
+    read_body(req, body, sizeof(body));
+    int idx = 0; char name[MAX_POINT_NAME] = {0};
+    if (!json_int(body, "index", &idx) ||
+        !json_str(body, "name", name, sizeof(name))) {
+        send_err(req, "params required"); return ESP_OK;
+    }
+    esp_err_t err = job_edit_name((uint32_t)idx, name);
     err == ESP_OK ? send_ok(req) : send_err(req, "not found");
     return ESP_OK;
 }
@@ -770,6 +821,7 @@ esp_err_t web_server_start(void)
         { "/api/job/delete",    HTTP_POST, h_job_delete,    NULL },
         { "/api/record/delete", HTTP_POST, h_rec_delete,    NULL },
         { "/api/record/sight",  HTTP_POST, h_rec_sight,     NULL },
+        { "/api/record/name",   HTTP_POST, h_rec_name,      NULL },
         { "/api/settings",      HTTP_POST, h_settings_post, NULL },
         { "/api/files",         HTTP_GET,  h_files,         NULL },
         { "/api/dblr_repeat",   HTTP_POST, h_dblr_repeat,   NULL },

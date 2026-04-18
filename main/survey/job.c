@@ -19,7 +19,6 @@ static uint32_t         s_count = 0;
 static void update_current_from_records(void);
 static SemaphoreHandle_t s_mtx  = NULL;
 
-static void update_current_from_records(void);
 // ─── Init ─────────────────────────────────────────────────────────────────────
 #define ACTIVE_JOB_FILE SPIFFS_BASE "/active_job.txt"
 
@@ -208,6 +207,76 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
         .valid    = true,
     };
 
+    // ─── Auto-generate point name ─────────────────────────────────────
+    r.name[0] = '\0';
+    if (sight == SIGHT_BS || sight == SIGHT_BS1) {
+        // First BS of job → BM001, else copy from previous FS/FS2
+        int has_prev_bs = 0;
+        for (uint32_t i = 0; i < s_count; i++) {
+            if (s_records[i].valid && !s_records[i].voided &&
+                (s_records[i].sight == SIGHT_BS || s_records[i].sight == SIGHT_BS1)) {
+                has_prev_bs = 1; break;
+            }
+        }
+        if (!has_prev_bs) {
+            strcpy(r.name, "BM001");
+        } else {
+            // Copy from most recent FS/FS2
+            for (int i = (int)s_count - 1; i >= 0; i--) {
+                if (s_records[i].valid && !s_records[i].voided &&
+                    (s_records[i].sight == SIGHT_FS || s_records[i].sight == SIGHT_FS2)) {
+                    strncpy(r.name, s_records[i].name, MAX_POINT_NAME-1);
+                    r.name[MAX_POINT_NAME-1] = '\0';
+                    break;
+                }
+            }
+        }
+    } else if (sight == SIGHT_BS2) {
+        // Copy from BS1 of current setup (previous BS1 record)
+        for (int i = (int)s_count - 1; i >= 0; i--) {
+            if (s_records[i].valid && !s_records[i].voided &&
+                s_records[i].sight == SIGHT_BS1) {
+                strncpy(r.name, s_records[i].name, MAX_POINT_NAME-1);
+                r.name[MAX_POINT_NAME-1] = '\0';
+                break;
+            }
+        }
+    } else if (sight == SIGHT_FS || sight == SIGHT_FS1) {
+        // Auto-increment TP name
+        int max_tp = 0;
+        for (uint32_t i = 0; i < s_count; i++) {
+            if (s_records[i].valid && !s_records[i].voided) {
+                int tp_num = 0;
+                if (sscanf(s_records[i].name, "TP%d", &tp_num) == 1) {
+                    if (tp_num > max_tp) max_tp = tp_num;
+                }
+            }
+        }
+        snprintf(r.name, MAX_POINT_NAME, "TP%03d", max_tp + 1);
+    } else if (sight == SIGHT_FS2) {
+        // Copy from FS1 of current setup
+        for (int i = (int)s_count - 1; i >= 0; i--) {
+            if (s_records[i].valid && !s_records[i].voided &&
+                s_records[i].sight == SIGHT_FS1) {
+                strncpy(r.name, s_records[i].name, MAX_POINT_NAME-1);
+                r.name[MAX_POINT_NAME-1] = '\0';
+                break;
+            }
+        }
+    } else if (sight == SIGHT_IS) {
+        // Auto-increment IS name
+        int max_is = 0;
+        for (uint32_t i = 0; i < s_count; i++) {
+            if (s_records[i].valid && !s_records[i].voided) {
+                int is_num = 0;
+                if (sscanf(s_records[i].name, "IS%d", &is_num) == 1) {
+                    if (is_num > max_is) max_is = is_num;
+                }
+            }
+        }
+        snprintf(r.name, MAX_POINT_NAME, "IS%03d", max_is + 1);
+    }
+
     s_records[s_count++] = r;
     s_job.current_hi   = hi;
     s_job.current_rl   = rl;
@@ -219,7 +288,7 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
     storage_save_meta(&s_job);
 
     ESP_LOGI(TAG, "Added #%lu [%s] staff=%.4f dist=%.3f RL=%.4f",
-             (unsigned long)(unsigned long)r.index, sight_str(sight), staff, distance, rl);
+             (unsigned long)r.index, sight_str(sight), staff, distance, rl);
     return ESP_OK;
 }
 
@@ -279,7 +348,7 @@ esp_err_t job_edit_sight(uint32_t index, sight_type_t new_sight)
     if (!found) return ESP_ERR_NOT_FOUND;
 
     storage_rewrite_csv(&s_job, s_records, s_count);
-    ESP_LOGI(TAG, "Point #%lu sight changed to %s", (unsigned long)(unsigned long)index, sight_str(new_sight));
+    ESP_LOGI(TAG, "Point #%lu sight changed to %s", (unsigned long)index, sight_str(new_sight));
     return ESP_OK;
 }
 
@@ -300,6 +369,27 @@ uint32_t job_get_bs2_count(void) {
         if (s_records[i].valid && !s_records[i].voided
             && s_records[i].sight == SIGHT_BS2) n++;
     return n;
+}
+
+// ─── Edit point name ──────────────────────────────────────────────────────────
+esp_err_t job_edit_name(uint32_t index, const char *name)
+{
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    esp_err_t ret = ESP_ERR_NOT_FOUND;
+    for (uint32_t i = 0; i < s_count; i++) {
+        if (s_records[i].index == index && s_records[i].valid && !s_records[i].voided) {
+            strncpy(s_records[i].name, name, MAX_POINT_NAME-1);
+            s_records[i].name[MAX_POINT_NAME-1] = '\0';
+            ret = ESP_OK;
+            break;
+        }
+    }
+    xSemaphoreGive(s_mtx);
+    if (ret == ESP_OK) {
+        storage_rewrite_csv(&s_job, s_records, s_count);
+        ESP_LOGI(TAG, "Point #%lu name updated to [%s]", (unsigned long)index, name);
+    }
+    return ret;
 }
 void            job_lock(void)        { xSemaphoreTake(s_mtx, portMAX_DELAY); }
 void            job_unlock(void)      { xSemaphoreGive(s_mtx); }

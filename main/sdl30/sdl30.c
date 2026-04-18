@@ -69,11 +69,14 @@ esp_err_t sdl30_raw_cmd(const char *cmd, char *resp, size_t rlen)
     memset(resp, 0, rlen);
     size_t idx = 0;
     TickType_t t0 = xTaskGetTickCount();
+    TickType_t last_byte = t0;
     bool got = false;
 
     while ((xTaskGetTickCount() - t0) < pdMS_TO_TICKS(SDL_TIMEOUT_MS)) {
+        if ((xTaskGetTickCount() - last_byte) > pdMS_TO_TICKS(3000) && idx > 0) break;
         uint8_t b;
         if (uart_read_bytes(SDL_UART_NUM, &b, 1, pdMS_TO_TICKS(100)) > 0) {
+            last_byte = xTaskGetTickCount();
             if (b == 0x06) { strncpy(resp, "ACK", rlen-1); got = true; break; }
             if (b == 0x15) { strncpy(resp, "NAK", rlen-1); got = true; break; }
             if (idx < rlen-1) resp[idx++] = (char)b;
