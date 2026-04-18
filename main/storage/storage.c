@@ -131,7 +131,7 @@ uint32_t storage_load_records(const job_t *job,
         if (sscanf(line, "%lu,%23[^,],%3[^,],%f,%f,%f,%f,%7s",
                    (unsigned long*)&r.index, r.name, sight_s,
                    &r.staff, &r.distance,
-                   &r.hi, &r.rl, status_s) == 7) {
+                   &r.hi, &r.rl, status_s) == 8) {
             r.sight  = sight_from_str(sight_s);
             r.voided = (status_s[0] == 'V');
             r.valid  = true;

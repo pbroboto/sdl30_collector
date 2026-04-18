@@ -186,7 +186,8 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
             hi = rl + staff;
             break;
         case SIGHT_BS2:
-            // BS2 is a check reading - instrument hasn't moved, keep same HI
+            // BS2 is a check reading on same BM as BS1 - keep HI, compute check RL
+            rl = hi - staff;
             break;
         case SIGHT_IS:
         case SIGHT_FS:
