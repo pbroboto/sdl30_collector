@@ -16,10 +16,11 @@ static const char *TAG = "JOB";
 static job_t            s_job;
 static record_t         s_records[MAX_POINTS];
 static uint32_t         s_count = 0;
+static void update_current_from_records(void);
 static SemaphoreHandle_t s_mtx  = NULL;
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
 static void update_current_from_records(void);
+// ─── Init ─────────────────────────────────────────────────────────────────────
 #define ACTIVE_JOB_FILE SPIFFS_BASE "/active_job.txt"
 
 static void save_active_job_name(void)
@@ -183,8 +184,10 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
     switch (sight) {
         case SIGHT_BS:
         case SIGHT_BS1:
-        case SIGHT_BS2:
             hi = rl + staff;
+            break;
+        case SIGHT_BS2:
+            // BS2 is a check reading - instrument hasn't moved, keep same HI
             break;
         case SIGHT_IS:
         case SIGHT_FS:
@@ -216,7 +219,7 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
     storage_save_meta(&s_job);
 
     ESP_LOGI(TAG, "Added #%lu [%s] staff=%.4f dist=%.3f RL=%.4f",
-             (unsigned long)r.index, sight_str(sight), staff, distance, rl);
+             (unsigned long)(unsigned long)r.index, sight_str(sight), staff, distance, rl);
     return ESP_OK;
 }
 
@@ -276,7 +279,7 @@ esp_err_t job_edit_sight(uint32_t index, sight_type_t new_sight)
     if (!found) return ESP_ERR_NOT_FOUND;
 
     storage_rewrite_csv(&s_job, s_records, s_count);
-    ESP_LOGI(TAG, "Point #%lu sight changed to %s", (unsigned long)index, sight_str(new_sight));
+    ESP_LOGI(TAG, "Point #%lu sight changed to %s", (unsigned long)(unsigned long)index, sight_str(new_sight));
     return ESP_OK;
 }
 
@@ -289,6 +292,13 @@ uint32_t job_get_fs_count(void) {
     for (uint32_t i = 0; i < s_count; i++)
         if (s_records[i].valid && !s_records[i].voided
             && s_records[i].sight == SIGHT_FS) n++;
+    return n;
+}
+uint32_t job_get_bs2_count(void) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < s_count; i++)
+        if (s_records[i].valid && !s_records[i].voided
+            && s_records[i].sight == SIGHT_BS2) n++;
     return n;
 }
 void            job_lock(void)        { xSemaphoreTake(s_mtx, portMAX_DELAY); }

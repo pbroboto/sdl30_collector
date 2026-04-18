@@ -192,7 +192,7 @@ static esp_err_t h_status(httpd_req_t *req)
         g_sdl_ok ? "true" : "false",
         g_sdl_model, g_sdl_serial,
         job->name, job->current_hi, job->current_rl,
-        (unsigned long)job_get_count(), (unsigned long)(job_get_fs_count()+1), job->bench_rl,
+        (unsigned long)job_get_count(), (unsigned long)(job_get_fs_count()+job_get_bs2_count()+1), job->bench_rl,
         next_lbl, s_settings.obs_method,
         (int)s_dblr.step,
         s_dblr.passed ? "true" : "false",
@@ -321,41 +321,42 @@ static esp_err_t h_measure(httpd_req_t *req)
     if (s_dblr.step == DBLR_IDLE || s_dblr.step == DBLR_PASS || s_dblr.step == DBLR_FAIL)
         dblr_reset();
 
-    // Store reading for current step
+    // Store reading and save to job immediately (like BF)
     switch (s_dblr.step) {
-        case DBLR_BS1: s_dblr.bs1=staff; s_dblr.bs1_dist=distance; s_dblr.step=DBLR_FS1; break;
-        case DBLR_FS1: s_dblr.fs1=staff; s_dblr.fs1_dist=distance; s_dblr.step=DBLR_FS2; break;
-        case DBLR_FS2: s_dblr.fs2=staff; s_dblr.fs2_dist=distance; s_dblr.step=DBLR_BS2; break;
+        case DBLR_BS1:
+            s_dblr.bs1=staff; s_dblr.bs1_dist=distance;
+            job_add_point(SIGHT_BS1, staff, distance);
+            s_dblr.step=DBLR_FS1; break;
+        case DBLR_FS1:
+            s_dblr.fs1=staff; s_dblr.fs1_dist=distance;
+            job_add_point(SIGHT_FS1, staff, distance);
+            s_dblr.step=DBLR_FS2; break;
+        case DBLR_FS2:
+            s_dblr.fs2=staff; s_dblr.fs2_dist=distance;
+            job_add_point(SIGHT_FS2, staff, distance);
+            s_dblr.step=DBLR_BS2; break;
         case DBLR_BS2:
             s_dblr.bs2=staff; s_dblr.bs2_dist=distance;
-            // Calculate check
-            // For all methods: dh1=first_BS - first_FS, dh2=second_BS - second_FS
-            if (mi == 0) { // BFFB: BS1-FS1, BS2-FS2
-                s_dblr.dh1 = s_dblr.bs1 - s_dblr.fs1;
-                s_dblr.dh2 = s_dblr.bs2 - s_dblr.fs2;
-            } else if (mi == 1) { // BFBF: BS1-FS1, BS2-FS2
-                s_dblr.dh1 = s_dblr.bs1 - s_dblr.fs1;
-                s_dblr.dh2 = s_dblr.bs2 - s_dblr.fs2;
-            } else { // BBFF: BS1-FS1, BS2-FS2 (FS1=fs1, FS2=fs2)
-                s_dblr.dh1 = s_dblr.bs1 - s_dblr.fs1;
-                s_dblr.dh2 = s_dblr.bs2 - s_dblr.fs2;
-            }
+            // Save BS2 immediately — surveyor sees all 4 records
+            job_add_point(SIGHT_BS2, staff, distance);
+            // Now calculate PASS/FAIL
+            s_dblr.dh1 = s_dblr.bs1 - s_dblr.fs1;
+            s_dblr.dh2 = s_dblr.bs2 - s_dblr.fs2;
             s_dblr.diff_mm = fabsf(s_dblr.dh1 - s_dblr.dh2) * 1000.0f;
             s_dblr.passed  = (s_dblr.diff_mm <= s_settings.max_station_mm);
             s_dblr.step    = s_dblr.passed ? DBLR_PASS : DBLR_FAIL;
 
             if (s_dblr.passed) {
-                // Save all 4 raw readings as BS1/FS1/FS2/BS2
-                job_add_point(SIGHT_BS1, s_dblr.bs1, s_dblr.bs1_dist);
-                job_add_point(SIGHT_FS1, s_dblr.fs1, s_dblr.fs1_dist);
-                job_add_point(SIGHT_FS2, s_dblr.fs2, s_dblr.fs2_dist);
-                job_add_point(SIGHT_BS2, s_dblr.bs2, s_dblr.bs2_dist);
-                ESP_LOGI(TAG, "%s PASS: diff=%.3fmm "
-                         "BS1=%.4f FS1=%.4f FS2=%.4f BS2=%.4f",
-                         obs_method_str(method), s_dblr.diff_mm,
-                         s_dblr.bs1, s_dblr.fs1, s_dblr.fs2, s_dblr.bs2);
+                ESP_LOGI(TAG, "%s PASS: diff=%.3fmm",
+                         obs_method_str(method), s_dblr.diff_mm);
             } else {
-                ESP_LOGW(TAG, "%s FAIL: diff=%.3fmm > %.1fmm — repeat setup!",
+                // FAIL — delete all 4 records by index
+                uint32_t cnt = job_get_count();
+                uint32_t start = cnt;
+                for (uint32_t di = 0; di < 4 && start >= di+1; di++) {
+                    job_delete_point(start - di);
+                }
+                ESP_LOGW(TAG, "%s FAIL: diff=%.3fmm > %.1fmm — 4 records deleted!",
                          obs_method_str(method),
                          s_dblr.diff_mm, s_settings.max_station_mm);
             }
@@ -688,9 +689,47 @@ static esp_err_t h_files(httpd_req_t *req)
 }
 
 // ─── POST /api/dblr_repeat ───────────────────────────────────────────────────
+static esp_err_t h_clear_setup(httpd_req_t *req)
+{
+    // Delete backwards from last record until BS1 is deleted
+    // Only clears incomplete setup - does not touch completed setups (ending with BS2)
+    if (s_settings.obs_method >= 1 && s_settings.obs_method <= 3) {
+        job_lock();
+        const record_t *recs = job_get_records();
+        uint32_t count = job_get_count();
+        bool has_incomplete = (count > 0 && recs[count-1].sight != SIGHT_BS2
+                               && recs[count-1].sight != SIGHT_FS);
+        job_unlock();
+
+        if (has_incomplete) {
+            int deleted = 0;
+            bool found_bs1 = false;
+            for (int safety = 0; safety < 10 && !found_bs1; safety++) {
+                uint32_t cnt = job_get_count();
+                if (cnt == 0) break;
+                job_lock();
+                recs = job_get_records();
+                sight_type_t last_sight = recs[cnt-1].sight;
+                uint32_t last_idx = recs[cnt-1].index;
+                job_unlock();
+                job_delete_point(last_idx);
+                deleted++;
+                if (last_sight == SIGHT_BS1) found_bs1 = true;
+            }
+            ESP_LOGI(TAG, "Clear setup: deleted %d records", deleted);
+        }
+    }
+    dblr_reset();
+    if (s_settings.obs_method >= 1 && s_settings.obs_method <= 3)
+        s_dblr.step = DBLR_BS1;
+    send_ok(req);
+    return ESP_OK;
+}
+
 static esp_err_t h_dblr_repeat(httpd_req_t *req)
 {
     dblr_reset();
+    s_dblr.step = DBLR_BS1;  // ready for first B
     ESP_LOGI(TAG, "DBLR: setup repeated by user");
     send_ok(req);
     return ESP_OK;
@@ -734,6 +773,7 @@ esp_err_t web_server_start(void)
         { "/api/settings",      HTTP_POST, h_settings_post, NULL },
         { "/api/files",         HTTP_GET,  h_files,         NULL },
         { "/api/dblr_repeat",   HTTP_POST, h_dblr_repeat,   NULL },
+        { "/api/clear_setup",   HTTP_POST, h_clear_setup,   NULL },
     };
     for (int i = 0; i < 18; i++)
         httpd_register_uri_handler(s_httpd, &uris[i]);

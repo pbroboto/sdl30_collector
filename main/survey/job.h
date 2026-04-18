@@ -80,6 +80,7 @@ const record_t *job_get_records(void);
  */
 uint32_t job_get_count(void);
 uint32_t job_get_fs_count(void);
+uint32_t job_get_bs2_count(void);
 
 /**
  * Take/give the data mutex — used by web server
