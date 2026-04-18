@@ -1,367 +1,259 @@
-# SDL30 Collector V1 — Development Journal
+# SDL30 Collector V1 — Development Log
 
-> **"New life for an old instrument"**  
-> A case study: replacing the broken Sokkia/Topcon SDR33 data collector  
-> with an ESP32-based web UI for under ฿1,000.
+## Overview
 
----
+ESP32-based wireless data collector for Sokkia SDL30 digital level, replacing the obsolete SDR33 data collector (original cost ~$1,000+ USD) with a DIY solution under ฿1,000 THB.
 
-## Background
+**Target device:** Sokkia SDL30 SN:001786, ROM 1112 (older model without name field support)
 
-![Broken SDR33](images/SDR33_broken.jpg)
-*The broken Sokkia SDR33 — the inspiration for this project*
-
-The **Sokkia SDL30** (also branded Topcon after the 2008 merger) is a high-quality digital barcode level manufactured around 1995, marketed as **"PowerLevel SDL30"**. Its original companion data collector was the **Sokkia SDR33** — a dedicated handheld device costing over $1,000 USD to replace.
-
-When the SDR33 breaks (black screen, broken DB-25 connector cover held together with yellow tape!), the SDL30 becomes unusable for data recording — despite being a perfectly functional precision instrument.
-
-![SDL30 on tripod](images/SDL30_on_tripod.jpg)
-*The Sokkia SDL30 "PowerLevel" — still measuring 0.3mm misclosure after ~30 years!*
-
-This project replaces the SDR33 with:
-- **ESP32-WROOM-32** (~฿200)
-- **SP3232EEN RS232-TTL breakboard** (~฿50)
-- **Custom USB-to-Hirose-6-pin cable** (Prolific PL2303)
-
-**Total cost: under ฿500** vs $1,000+ for SDR33 replacement.
+**Mission:** Add modern features (point names, digital workflows, BFFB method) that newer SDL30 firmware versions have, but this older unit lacks.
 
 ---
 
 ## Hardware
 
-### Components
+### Bill of Materials
 
-| Component | Description | Approx. Cost |
-|-----------|-------------|-------------|
-| ESP32-WROOM-32 | Main controller, WiFi AP | ฿200 |
-| SP3232EEN breakboard | RS232 ↔ TTL level converter | ฿50 |
-| Hirose HR10A-7P-6P cable | Custom cable, Prolific PL2303 | ฿200 |
-| **Total** | | **< ฿500** |
+| Component | Part | Price (THB) |
+|-----------|------|-------------|
+| MCU | ESP32-WROOM-32 DevKit | 80-120 |
+| RS-232 level shifter | SP3232EEN module | 40 |
+| Cable | USB-A to Hirose 6-pin | 200 |
+| Battery | 18650 3200mAh | 150 |
+| Battery board | PL4506+MT3608 all-in-one | 80 |
+| Enclosure, wiring | ABS box 120×97×40mm | 100 |
+| **TOTAL** | | **~650-700 THB** |
 
-### SDL30 RS-232 Connector
-
-The SDL30 has a **Hirose HR10A-7P-6P** 6-pin circular connector on the back panel labelled **"DATA OUT"**.
-
-> ⚠️ **CRITICAL — Pin numbering:**  
-> Pin 1 is **counter-clockwise** from the key tab — face view.  
-> Many online datasheets show clockwise — **WRONG** for this connector.  
-> **Confirmed correct by field testing.**
-
-![Hirose 6-pin face view](images/Hirose-6pin-face-view.webp)
-*Hirose HR10A-7P-6P — counter-clockwise from key tab (top)*
-
-| Pin | Wire Color | Signal | Direction |
-|-----|-----------|--------|-----------|
-| 1 | Black | GND | — |
-| 2 | — | NC | — |
-| 3 | White | TXD | SDL30 → ESP32 |
-| 4 | Green | RXD | ESP32 → SDL30 |
-| 5 | Red | NC | — |
-| 6 | — | NC | — |
-
-### Wiring Diagram
-
-![Wiring Diagram](images/SDL30-SP3232EEN-ESP32.jpg)
+### Wiring
 
 ```
-SDL30 Pin 1 (Black)  ──────────────────────── GND
-SDL30 Pin 3 (White)  ── RS232 RXD  TTL TXD ── GPIO16 (UART2 RX)
-SDL30 Pin 4 (Green)  ── RS232 TXD  TTL RXD ── GPIO17 (UART2 TX)
-                        SP3232EEN   VCC   ── 3.3V
+SDL30 (Hirose 6-pin) → USB-A cable → RS-232 breakout:
+  Pin1 Black = GND
+  Pin3 White = TXD (SDL30 → host)
+  Pin4 Green = RXD (host → SDL30)
+  Pin5 Red   = NC (+5V on some pinouts)
+
+SP3232EEN module:
+  RS232 TX/RX ← connects to Hirose cable wires
+  TTL TXD (White) → ESP32 GPIO 16 (SDL_GPIO_RX)
+  TTL RXD (Green) → ESP32 GPIO 17 (SDL_GPIO_TX)
+  VCC → ESP32 3.3V
+  GND → ESP32 GND
 ```
 
-> TX/RX cross at SP3232EEN — TTL TXD → ESP32 GPIO16 (RX), TTL RXD → ESP32 GPIO17 (TX).
+### config.h
+
+```c
+#define SDL_UART_NUM        UART_NUM_2
+#define SDL_GPIO_RX         GPIO_NUM_16   // SP3232EEN TTL TXD (white wire)
+#define SDL_GPIO_TX         GPIO_NUM_17   // SP3232EEN TTL RXD (green wire)
+#define SDL_BAUD            2400          // confirmed: 2400 works with SDL30
+#define SDL_TIMEOUT_MS      15000         // hot weather + 60m distance safety margin
+```
 
 ---
 
 ## SDL30 Protocol
 
-### Communication Settings
+### Commands (Simple RS-232 ASCII)
 
-From official Sokkia SDL30 manual (取扱説明書, section 13.3):
+| Command | Purpose | Response Example |
+|---------|---------|------------------|
+| `LM\r` | Measure | `LM 0.7890,1.88\r\n` |
+| `LA\r` | Info | `LA SDL30,001786,1112\r\n` |
+| `LB\r` | Parameters | `LB 0,0\r\n` |
+| `LT\r` | Stop | (no response) |
+| `LXa\r` | Single mode | ACK (0x06) |
+| `L/B 0,0\r` | 0.0001m resolution | ACK |
 
-| Parameter | Factory Default* | This Project |
-|-----------|-----------------|-------------|
-| Baud rate | **1200** | **2400** |
-| Parity | **None** | None |
-| Measurement mode | **Single** | Single |
+### LM Response Format
 
-> Change baud in SDL30: `MENU → 4.Config → 4.RS-232 → Baud=2400`  
-> Settings are saved after power off.
+**Manual says:** `LM _-9.9999,999.999\r\n`
+**SDL30 actually sends:** `LM 0.7890,1.88\r\n`
 
-### Operating Screen
+Differences from manual:
+- No `+` sign on positive values
+- No leading zeros on distance
+- No space after comma
+- One space after `LM` always
 
-From manual section 14 (重要):
-> *"SDL30 only receives commands in Status mode or Menu mode."*
-
-**Status mode = Ht-diff standby screen:**
-```
-Meas
-     Rh    xxxx m
-S  Hd    yyyy m
-```
-`LM\r` works from this screen AND from the sub-menu screen — SDL30 returns to standby after measurement.
-
-If MENU button accidentally pressed → press **ESC** to return.
-
-### Command Reference
-
-From manual section 14.2:
-
-**Basic commands:**
-
-| Command | Description |
-|---------|-------------|
-| `LM\r` | Start measurement, output result |
-| `LT\r` | Stop measurement (silent in Single mode) |
-
-**Data output commands:**
-
-| Command | Response | Description |
-|---------|----------|-------------|
-| `LA\r` | `LA SDL30,001786,1112\r\n` | Model, serial, ROM version |
-| `LB\r` | `LB 0,0\r\n` | Display digits parameter |
-
-**Setting commands:**
-
-| Command | Description |
-|---------|-------------|
-| `LXa\r` | Set Single measurement (factory default) |
-| `LXb\r` | Set Continuous (precise) |
-| `LXe\r` | Set Continuous (rough) |
-
-**Data input command:**
-
-| Command | Description |
-|---------|-------------|
-| `L/B 0,x\r` | Set display to 0.0001m resolution |
-| `L/B 1,x\r` | Set display to 0.001m resolution |
-
-### Response Formats (section 14.3)
-
-**LM — Measurement:**
-```
-Manual documentation:    "LM _ -9.9999, 999.999\r\n"
-Real SDL30 (SN:001786):  "LM 0.7890,1.88\r\n"
-
-Differences vs manual:
-  ✗ No + sign on positive values
-  ✗ No leading zeros on distance
-  ✗ No space after comma
-  ✓ Space after "LM" prefix
-  ✓ CR+LF terminator
-```
-
-**LA — Instrument info:**
-```
-Format:  "LA SDL30,123456,0100\r\n"
-           model  serial  ROM(4 digits)
-Real:    "LA SDL30,001786,1112\r\n"
-```
-
-**Error response:**
-```
-Format:  "LM Exxx\r\n"   (xxx = 3-digit code)
-```
-
-### Error Codes (section 15)
-
-| Code | Cause |
-|------|-------|
-| E400, E401, E405, E406 | System error — contact service |
-| E410–E429 | Measurement error: not sighting staff / out of focus / staff obscured / too close or far / shadow / light entering eyepiece |
+**Lesson:** Always test with real hardware. Manuals are starting points, not scripture.
 
 ---
 
 ## Software Architecture
 
-### Framework
-- **ESP-IDF v5.4**
-- **FreeRTOS** tasks
-- **SPIFFS** (875KB available)
-- **ESP HTTP Server**
-- **cJSON**
-
-### Project Structure
+### ESP-IDF v5.4 — Modular C Code
 
 ```
-sdl30_collector/
-├── CMakeLists.txt
-├── sdkconfig.defaults
-├── partitions.csv          ← 960KB SPIFFS
-└── main/
-    ├── config.h            ← baud=2400, GPIO, WiFi, limits
-    ├── main.c              ← app_main, SDL30 monitor task
-    ├── sdl30_types.h       ← sight_type_t enum
-    ├── settings.h/c        ← survey settings + SPIFFS save
-    ├── sdl30/sdl30.h/c     ← UART: LM/LA/LB/LT
-    ├── survey/survey.h/c   ← leveling arithmetic
-    ├── survey/job.h/c      ← jobs, records, CSV
-    ├── storage/storage.h/c ← SPIFFS init, file I/O
-    └── web/
-        ├── web_server.h/c  ← WiFi AP, 15 REST endpoints
-        └── web_ui.h        ← 5-tab SPA embedded
+main/
+├── main.c                  # App entry, SDL30 connection check
+├── config.h                # Hardware pins, timeouts, AP credentials
+├── sdl30_types.h           # Common types (record_t, sight_type_t)
+├── sdl30/
+│   ├── sdl30.c/h           # UART protocol, adaptive timeout
+├── survey/
+│   ├── job.c/h             # Job management, auto-naming, HI/RL calc
+│   ├── survey.c/h          # BFFB state machine, PASS/FAIL logic
+├── storage/
+│   ├── storage.c/h         # SPIFFS, CSV append/rewrite, meta files
+└── web/
+    ├── web_server.c/h      # REST API endpoints
+    └── web_ui.h            # Single-page web app (HTML/CSS/JS in C string)
 ```
 
-### WiFi AP
+### Features
+
+**Observation Methods:**
+- **BF** (Basic/Fast) — single BS + FS per setup
+- **BFFB** (3rd order) — BS1, FS1, FS2, BS2 with sinking check
+
+**Point Name System:**
+- Auto-generated: BM001 (first BS), TP001/TP002... (each new FS)
+- BS2 copies from BS1 of current setup (same BM)
+- FS2 copies from FS1 of current setup (same TP)
+- Manual edit via web UI (tap name cell → prompt)
+- `name[24]` field in `record_t` struct
+
+**Job Management:**
+- Multiple jobs with meta file (bench_rl, point_count)
+- CSV auto-saves each record
+- Restore job on reboot
+- Jobs tab for switch/delete
+
+**Web UI (5-tab SPA):**
+- Measure (live reading + method-specific UI)
+- Records (scrollable table with edit)
+- Jobs (switch/create/delete)
+- Report (closed-loop misclosure)
+- Settings (method, limits, baud)
+
+**Safety Checks:**
+- Station check: |BS-FS| per setup ≤ 2mm (configurable)
+- Distance balance: |ΣdBS-ΣdFS| ≤ 10m (configurable)
+- BFFB double-reading check: |BS1-BS2| and |FS1-FS2| ≤ limit
+- BFFB sinking check: BS2 RL vs opening BM
+
+---
+
+## BFFB Method Details
+
+### Reading Sequence
+
 ```
-SSID: SDL30_Collector  Password: survey1234  IP: 192.168.4.1
+Setup N:
+  BS1 — aim at BM, read staff
+  FS1 — turn to TP, read staff
+  FS2 — re-read TP (check)
+  BS2 — turn back to BM (sinking check)
+```
+
+### Arithmetic
+
+```
+Per-setup mean staff:
+  BS_mean = (BS1 + BS2) / 2
+  FS_mean = (FS1 + FS2) / 2
+
+Elevation change per setup:
+  ΔH = BS_mean - FS_mean
+
+HI after setup:
+  HI = previous_RL + BS_mean
+
+TP RL:
+  TP_RL = HI - FS_mean
+
+BS2 sinking check RL:
+  BS2_RL = HI - BS2_staff
+  Compare to BM_RL — if differs > 1-2mm, tripod sank
+```
+
+### PASS/FAIL Criteria
+
+```
+Station check: |BS1 - FS1| reading spread within limit
+Double-reading: |BS1-BS2| and |FS1-FS2| ≤ 0.001m typical
+Sinking check: |BS2_RL - BM_RL| ≤ max_station_mm
 ```
 
 ---
 
-## Web UI — 5 Tabs
+## Critical Build Fixes
 
-### Tab 1: Measure
-- Status: Job, HI, RL, Readings, Points
-- Sight: **[BS] [FS]** (leveling) or **[BS] [FS] [IS]** (SET-OUT)
-- Auto-advance: BS→FS, FS→BS
-- WiFi pre-warm on screen wake (visibilitychange)
-
-### Tab 2: Records
-**Top — running summary (side by side):**
-
-| Arithmetic | Dist Balance |
-|-----------|-------------|
-| Σ BS | Σ BS dist |
-| Σ FS | Σ FS dist |
-| ΣBS−ΣFS | Diff |
-| BS-FS | Limit |
-| 1st Elev. | PASS / FAIL |
-| **Last RL** (after FS) or **Last HI** (after BS) | |
-
-**Bottom — observation table:** #, Sight, Staff, Dist, HI, RL, [delete]
-
-### Tab 3: Jobs
-Active job, BM, Download CSV, Create job, Storage bar, Job list
-
-### Tab 4: Report
-
-```
-MISCLOSURE REPORT          DISTANCE REPORT
-Opening BM + ΣBS - ΣFS    ΣBS Dist + ΣFS Dist
-= Comp. Elev  (hint)       = Total Dist  (hint)
-
-Σ BS    +x.xxxx m          Σ BS dist  xx.xxx m
-Σ FS    +x.xxxx m          Σ FS dist  xx.xxx m
-ΔElev   ±x.xxxx m          Dist Bal.  xx.xxx m < OK
-Comp.   x.xxxx m           Total dist xx.xxx m
-Closing x.xxxx m
-Misclose ±x.xxxx m (x.xmm)
-  GREEN(<5mm) ORANGE(<20mm) RED(≥20mm)
-Points  n
-Readings n
-```
-
-Export: **CSV** ✅ | GSI-16 (pending) | M5/Zeiss (pending)
-
-### Tab 5: Settings
-Method (BF/BFFB/BFBF/BBFF/SET-OUT), limits, alerts, baud
-
----
-
-## Observation Methods
-
-| Method | Pattern | IS | PASS/FAIL |
-|--------|---------|-----|----------|
-| **BF** | BS,FS,BS,FS... | No | Arithmetic only |
-| BFFB | BS,FS,FS,BS | No | Phase 2 |
-| BFBF | BS,FS,BS,FS | No | Phase 2 |
-| BBFF | BS,BS,FS,FS | No | Phase 2 |
-| SET-OUT | BS+IS pegs | Yes | Design RL |
-
----
-
-## REST API
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/` | Web UI SPA |
-| GET | `/api/status` | Job, HI, RL, SDL30 status |
-| GET | `/api/records` | All records |
-| GET | `/api/jobs` | Job list + storage |
-| GET | `/api/download` | CSV download |
-| GET | `/api/misclose?closing_rl=x` | Misclose calc |
-| GET | `/api/settings` | Settings |
-| POST | `/api/measure` | Trigger LM |
-| POST | `/api/sight` | Set next sight |
-| POST | `/api/job/new` | Create job |
-| POST | `/api/job/select` | Select job |
-| POST | `/api/job/bench` | Set opening BM |
-| POST | `/api/job/delete` | Delete job |
-| POST | `/api/record/delete` | Delete record |
-| POST | `/api/settings` | Save settings |
-
----
-
-## CSV Format
-
-```csv
-Point,Sight,Staff(m),Distance(m),HI(m),RL(m),Status
-1,BS,0.8596,1.8700,100.8596,100.0000,OK
-2,FS,0.6871,1.8600,100.8596,100.1725,OK
-```
-
----
-
-## Build & Flash
+### Buffer sizes (Armbian/ESP-IDF)
 
 ```bash
-get_idf                                    # load ESP-IDF
-cd ~/dev/sdl30_collector
-rm -rf build                               # clean (first time)
-idf.py build
-idf.py -p /dev/ttyUSB0 flash monitor
+python3 -c "
+c = open('main/web/web_server.c').read()
+c = c.replace('char path[80]', 'char path[320]')
+c = c.replace('char path[128]', 'char path[320]')
+c = c.replace('char row[128]', 'char row[512]')
+open('main/web/web_server.c','w').write(c)
+"
+```
+
+### Format specifiers (xtensa toolchain)
+
+`uint32_t` must use `%lu` with `(unsigned long)` cast, not `%u`.
+
+### SPIFFS CSV format (8 columns)
+
+```
+Point, Name, Sight, Staff(m), Distance(m), HI(m), RL(m), Status
+```
+
+`sscanf` format: `"%lu,%23[^,],%3[^,],%f,%f,%f,%f,%7s"` expecting 8 return values.
+
+---
+
+## Lessons Learned
+
+1. **Manual is a starting point, not the truth** — always test with real hardware
+2. **Android Chrome stricter than Desktop** — use desktop F12 console for debugging, always final test on phone
+3. **Non-ASCII chars in JS strings cause silent SyntaxError on Android** — OK in HTML text content, NEVER inside `<script>` strings
+4. **UI element removal needs null checks** — loops referencing removed DOM elements crash silently
+5. **Loose solder wire looks like timeout** — always check hardware before blaming software
+6. **Adaptive timeout beats fixed timeout** — SDL30 sends intermediate bytes during measurement; reset timer on byte arrival
+7. **HI/RL should be computed on display, not stored** — allows fixes to apply to existing data
+8. **Optimistic UI (auto-save on change) better than Save button** — field use favors fewer taps
+9. **Laptop USB provides ~500mA — insufficient for ESP32 WiFi peaks** — use phone charger (2A+) for reliable power
+
+---
+
+## Git History
+
+```
+25bdb69 Add Point Name feature (name[24] in record_t)
+d17fa1b Fix setMethodUI crash when mb-2/mb-3 buttons removed
+d73be01 BFFB UI improvements - remove BFBF/BBFF, fix arithmetic, scroll records
+a07c178 BFFB UI - DiNi style highlight, combined sight card, auto-save settings
+7026863 Add BFFB/BFBF/BBFF double-reading methods
+5f95db5 Restore working web_ui.h and web_server.c before BFFB UI
+604f1e4 Fix Jobs tab - custom modal, data-name onclick, meta scan
+771e2f9 Add setup colour coding, delete warning, job restore on reboot
+c68bc28 SDL30 Collector V1 - initial release
 ```
 
 ---
 
-## Known Issues
+## V2 Roadmap (ESP32-S3-N16)
 
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| LM timeout after idle | Android WiFi sleep | visibilitychange pre-warm ✅ |
-| MENU button pressed | Operator error | LM still works from sub-menu ✅ |
-| uint32_t format error | xtensa compiler | Use `%lu` + `(unsigned long)` cast ✅ |
-
----
-
-## Field Test Results
-
-| Test | Misclosure | Notes |
-|------|-----------|-------|
-| Indoor closed loop | **0.7mm** 🟢 | 4 readings, 3 points |
-| House floor survey | **0.3mm** 🟢🏆 | 6 readings, 4 points, 21m total |
-
-House floor: 7.3mm height difference corner to corner — excellent construction!
+- 16MB flash → 13MB SPIFFS → 295,000 records possible
+- 8MB PSRAM → larger web UI without size concerns
+- Dual-core LX7 @ 240MHz → faster UI
+- 3-LED status (🔴 error, 🟡 WiFi, 🟢 SDL30)
+- Active buzzer (PASS/FAIL/measure beeps)
+- USB-OTG support (direct PC connection possible)
+- Same GPIO 16/17 UART pins for code compatibility
 
 ---
 
-## Pending
+## Field Test Protocol
 
-- [ ] GSI-16 export
-- [ ] M5/Zeiss export
-- [ ] CSV 4 decimal places for round numbers
-- [ ] SET-OUT full implementation
-- [ ] BFFB/BFBF/BBFF Phase 2
+1. Short closed loop (6-8 setups) returning to opening BM
+2. Target misclosure: ≤ 2mm per setup (3rd order)
+3. Compare with Sokkia SDR33 on same line if available
+4. Test in hot weather (60m distance) — verify adaptive timeout
+5. Test battery life — target 8+ hours continuous use
 
----
-
-## Version History
-
-| Version | Date | Notes |
-|---------|------|-------|
-| V1.0 | April 2026 | BF method, 5-tab web UI, CSV, WiFi fix |
-
----
-
-## Credits
-
-- **Instrument:** Sokkia PowerLevel SDL30 (SN:001786, ROM:1112)
-- **Original recorder:** Sokkia SDR33 (broken — black screen, DB-25 cover damaged)
-- **Developer:** Prajuab — 30 years surveying, Thailand
-- **Inspiration:** *"Life finds a way!"* — Ian Malcolm, Jurassic Park 🦕
-
----
-
-*"SDL30 lives again!"* 🎉
