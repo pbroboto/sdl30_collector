@@ -4,7 +4,7 @@
 #pragma once
 
 // ─── SDL30 UART ───────────────────────────────────────────────────────────────
-#define SDL_UART_NUM        UART_NUM_2
+#define SDL_UART_NUM        UART_NUM_1
 #define SDL_BAUD            2400        // confirmed: 2400 works with SDL30
 #define SDL_GPIO_RX         GPIO_NUM_16 // SP3232EEN TTL TXD (white wire)
 #define SDL_GPIO_TX         GPIO_NUM_17 // SP3232EEN TTL RXD (green wire)

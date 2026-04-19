@@ -81,7 +81,7 @@ static void sdl_monitor_task(void *pv)
 void app_main(void)
 {
     ESP_LOGI(TAG, "=== SDL30 Collector starting ===");
-    ESP_LOGI(TAG, "ESP32-WROOM-32  ESP-IDF v5.4");
+    ESP_LOGI(TAG, "ESP32-S3-N16  ESP-IDF v5.4");
 
     // LED
     gpio_config_t led_cfg = {
