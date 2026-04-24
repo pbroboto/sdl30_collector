@@ -12,7 +12,7 @@
 
 static const char *TAG = "STORAGE";
 
-#define CSV_HEADER "Point,Name,Sight,Staff(m),Distance(m),HI(m),RL(m),Status\n"
+#define CSV_HEADER "Point,Setup,Name,Sight,Staff(m),Distance(m),HI(m),RL(m),Status\n"
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 esp_err_t storage_init(void)
@@ -48,8 +48,8 @@ esp_err_t storage_save_meta(const job_t *job)
     snprintf(path, sizeof(path), "%s/%s.meta", SPIFFS_BASE, job->name);
     FILE *f = fopen(path, "w");
     if (!f) return ESP_FAIL;
-    fprintf(f, "bench_rl=%.4f\npoint_count=%u\n",
-            job->bench_rl, (unsigned)job->point_count);
+    fprintf(f, "bench_rl=%.4f\npoint_count=%lu\n",
+            job->bench_rl, (unsigned long)job->point_count);
     fclose(f);
     return ESP_OK;
 }
@@ -64,7 +64,7 @@ esp_err_t storage_load_meta(job_t *job)
     while (fgets(line, sizeof(line), f)) {
         float fv; unsigned uv;
         if (sscanf(line, "bench_rl=%f",    &fv) == 1) job->bench_rl    = fv;
-        if (sscanf(line, "point_count=%u", &uv) == 1) job->point_count = uv;
+        if (sscanf(line, "point_count=%lu", (unsigned long*)&uv) == 1) job->point_count = uv;
     }
     fclose(f);
     return ESP_OK;
@@ -79,8 +79,8 @@ esp_err_t storage_append_record(const job_t *job, const record_t *r)
     if (!f) { ESP_LOGE(TAG, "Cannot open: %s", path); return ESP_FAIL; }
     fseek(f, 0, SEEK_END);
     if (ftell(f) == 0) fprintf(f, CSV_HEADER);
-    fprintf(f, "%lu,%s,%s,%+.4f,%.3f,%.4f,%.4f,%s\n",
-            (unsigned long)r->index, r->name, sight_str(r->sight),
+    fprintf(f, "%lu,%lu,%s,%s,%+.4f,%.3f,%.4f,%.4f,%s\n",
+            r->index, r->setup_no, r->name, sight_str(r->sight),
             r->staff, r->distance, r->hi, r->rl,
             r->voided ? "VOID" : "OK");
     fclose(f);
@@ -99,8 +99,8 @@ esp_err_t storage_rewrite_csv(const job_t *job,
     for (uint32_t i = 0; i < count; i++) {
         const record_t *r = &recs[i];
         if (!r->valid) continue;
-        fprintf(f, "%lu,%s,%s,%+.4f,%.3f,%.4f,%.4f,%s\n",
-                (unsigned long)r->index, r->name, sight_str(r->sight),
+        fprintf(f, "%lu,%lu,%s,%s,%+.4f,%.3f,%.4f,%.4f,%s\n",
+                r->index, r->setup_no, r->name, sight_str(r->sight),
                 r->staff, r->distance, r->hi, r->rl,
                 r->voided ? "VOID" : "OK");
     }
@@ -128,10 +128,10 @@ uint32_t storage_load_records(const job_t *job,
 
         record_t r = {0};
         char sight_s[4], status_s[8];
-        if (sscanf(line, "%lu,%23[^,],%3[^,],%f,%f,%f,%f,%7s",
-                   (unsigned long*)&r.index, r.name, sight_s,
+        if (sscanf(line, "%lu,%lu,%23[^,],%3[^,],%f,%f,%f,%f,%7s",
+                   &r.index, &r.setup_no, r.name, sight_s,
                    &r.staff, &r.distance,
-                   &r.hi, &r.rl, status_s) == 8) {
+                   &r.hi, &r.rl, status_s) == 9) {
             r.sight  = sight_from_str(sight_s);
             r.voided = (status_s[0] == 'V');
             r.valid  = true;
@@ -182,4 +182,137 @@ size_t storage_csv_size(const char *jobname)
     snprintf(path, sizeof(path), "%s/%s.csv", SPIFFS_BASE, jobname);
     struct stat st;
     return (stat(path, &st) == 0) ? st.st_size : 0;
+}
+// ─── Point comments (.notes file) ────────────────────────────────────────────
+// File format (one line per note):
+//   name,sight,setup_no,comment text
+// Example:
+//   BM001,BS1,1,Concrete nail on BC road
+//   TP004,FS1,1,Nut #4 at pole with concrete base
+
+static void notes_path(char *buf, size_t len, const char *job) {
+    snprintf(buf, len, "%s/%s.notes", SPIFFS_BASE, job);
+}
+
+esp_err_t storage_save_note(const char *job_name,
+                             const char *point_name,
+                             const char *sight,
+                             uint32_t    setup_no,
+                             const char *comment)
+{
+    // Load all existing notes except matching key
+    char path[64];
+    notes_path(path, sizeof(path), job_name);
+
+    // Read all existing lines into temp buffer
+    char lines[MAX_NOTES][80];
+    int  n = 0;
+
+    FILE *f = fopen(path, "r");
+    if (f) {
+        char line[80];
+        while (fgets(line, sizeof(line), f) && n < MAX_NOTES) {
+            // Strip newline
+            int len = strlen(line);
+            while (len > 0 && (line[len-1]=='\n'||line[len-1]=='\r'))
+                line[--len] = '\0';
+            if (len == 0) continue;
+
+            // Parse key: name,sight,setup_no
+            char ln[MAX_POINT_NAME], ls[4];
+            uint32_t lsno;
+            if (sscanf(line, "%23[^,],%3[^,],%lu,",
+                       ln, ls, (unsigned long*)&lsno) == 3) {
+                // Skip if matches key being replaced/deleted
+                if (strcmp(ln, point_name) == 0 &&
+                    strcmp(ls, sight)       == 0 &&
+                    lsno == setup_no) continue;
+            }
+            strncpy(lines[n++], line, 79);
+        }
+        fclose(f);
+    }
+
+    // Rewrite file with updated notes
+    f = fopen(path, "w");
+    if (!f) return ESP_FAIL;
+
+    for (int i = 0; i < n; i++)
+        fprintf(f, "%s\n", lines[i]);
+
+    // Add new note (skip if comment is empty — delete only)
+    if (comment && strlen(comment) > 0)
+        fprintf(f, "%s,%s,%lu,%-27.27s\n",
+                point_name, sight, (unsigned long)setup_no, comment);
+
+    fclose(f);
+    ESP_LOGI(TAG, "Note saved: %s,%s,%lu = [%s]",
+             point_name, sight, (unsigned long)setup_no,
+             comment ? comment : "(deleted)");
+    return ESP_OK;
+}
+
+esp_err_t storage_get_note(const char *job_name,
+                            const char *point_name,
+                            const char *sight,
+                            uint32_t    setup_no,
+                            char *buf, size_t len)
+{
+    char path[64];
+    notes_path(path, sizeof(path), job_name);
+
+    FILE *f = fopen(path, "r");
+    if (!f) return ESP_FAIL;
+
+    char line[80];
+    while (fgets(line, sizeof(line), f)) {
+        char ln[MAX_POINT_NAME], ls[4], lc[MAX_COMMENT_LEN + 1];
+        uint32_t lsno;
+        if (sscanf(line, "%23[^,],%3[^,],%lu,%27[^\n]",
+                   ln, ls, (unsigned long*)&lsno, lc) == 4) {
+            if (strcmp(ln, point_name) == 0 &&
+                strcmp(ls, sight)       == 0 &&
+                lsno == setup_no) {
+                strncpy(buf, lc, len - 1);
+                buf[len - 1] = '\0';
+                fclose(f);
+                return ESP_OK;
+            }
+        }
+    }
+    fclose(f);
+    buf[0] = '\0';
+    return ESP_FAIL;
+}
+
+int storage_load_notes(const char *job_name,
+                       char  point_names[][MAX_POINT_NAME],
+                       char  sights[][4],
+                       uint32_t setup_nos[],
+                       char  comments[][MAX_COMMENT_LEN + 1],
+                       int   max)
+{
+    char path[64];
+    notes_path(path, sizeof(path), job_name);
+
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+
+    int count = 0;
+    char line[80];
+    while (fgets(line, sizeof(line), f) && count < max) {
+        char lc[MAX_COMMENT_LEN + 1];
+        if (sscanf(line, "%23[^,],%3[^,],%lu,%27[^\n]",
+                   point_names[count],
+                   sights[count],
+                   (unsigned long*)&setup_nos[count],
+                   lc) == 4) {
+            strncpy(comments[count], lc, MAX_COMMENT_LEN);
+            comments[count][MAX_COMMENT_LEN] = '\0';
+            count++;
+        }
+    }
+    fclose(f);
+    ESP_LOGI(TAG, "Loaded %d notes for job %s", count, job_name);
+    return count;
 }

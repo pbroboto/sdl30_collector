@@ -1,0 +1,272 @@
+/**
+ * storage/m5_export.c — Trimble DiNi M5 format export
+ *
+ * Infers setup_no and method from sight type sequence.
+ * Uses hi/rl already stored in record_t — no recomputation.
+ * Handles mixed BF/BFFB setups with Cont-Line insertion.
+ */
+#include "m5_export.h"
+#include "../config.h"
+#include "esp_log.h"
+#include <string.h>
+#include <math.h>
+
+static const char *TAG = "M5";
+
+// ─── M5 constants ─────────────────────────────────────────────────────────────
+#define M5_EMPTY  "                      "   // 22 spaces (one empty data block)
+#define M5_M      "m   "                     // 4-char metre unit
+
+// ─── Infer method from sight type ─────────────────────────────────────────────
+static inline int is_bffb_sight(sight_type_t s)
+{
+    return (s == SIGHT_BS1 || s == SIGHT_FS1 ||
+            s == SIGHT_FS2 || s == SIGHT_BS2);
+}
+
+static inline const char *infer_method(sight_type_t s)
+{
+    return is_bffb_sight(s) ? "BFFB" : "BF";
+}
+
+// Returns 1 if this sight opens a new instrument setup
+static inline int opens_setup(sight_type_t s)
+{
+    return (s == SIGHT_BS || s == SIGHT_BS1);
+}
+
+// ─── Write one 121-byte M5 line ───────────────────────────────────────────────
+// type2  : "TO ", "KD1", "KD2"
+// info   : 27-char information block
+// t3/v3  : TK3 type identifier + value (NULL = empty block)
+// t4/v4  : TK4
+// t5/v5  : TK5
+static void write_line(FILE *f, uint32_t *addr,
+                       const char *type2,
+                       const char *info,
+                       const char *t3, float v3,
+                       const char *t4, float v4,
+                       const char *t5, float v5)
+{
+    char b3[23], b4[23], b5[23];
+
+    // Each data block: type(2) + space(1) + value(14) + space(1) + unit(4) = 22
+    if (t3) snprintf(b3, sizeof(b3), "%-2s %14.6f %-4s", t3, v3, M5_M);
+    else    strncpy(b3, M5_EMPTY, sizeof(b3));
+
+    if (t4) snprintf(b4, sizeof(b4), "%-2s %14.6f %-4s", t4, v4, M5_M);
+    else    strncpy(b4, M5_EMPTY, sizeof(b4));
+
+    if (t5) snprintf(b5, sizeof(b5), "%-2s %14.6f %-4s", t5, v5, M5_M);
+    else    strncpy(b5, M5_EMPTY, sizeof(b5));
+
+    // Full 121-byte line
+    fprintf(f, "For M5|Adr%5lu|%-3s %-27s|%s|%s|%s| \r\n",
+            (unsigned long)(*addr)++,
+            type2, info,
+            b3, b4, b5);
+}
+
+// ─── Build 27-char info block for KD records ─────────────────────────────────
+// seq > 0 → include sequence counter; seq == 0 → Z/closing record
+static void make_info_kd(char *buf, const char *name, int seq, int zno)
+{
+    char nm[9];
+    snprintf(nm, sizeof(nm), "%-8.8s", name);  // left-align, truncate to 8 chars
+    if (seq > 0)
+        snprintf(buf, 28, "     %s      %3d%3d%3d", nm, seq, 1, zno);
+    else
+        snprintf(buf, 28, "     %s                %3d", nm, zno);
+}
+
+// ─── Build 27-char info block for TO (text) records ──────────────────────────
+static void make_info_to(char *buf, const char *keyword,
+                         const char *method, int zno)
+{
+    // keyword (10) + spaces (9) + method (4) + line no (5-right) = 27 - 1 spare + nul
+    snprintf(buf, 28, "%-10.10s         %-4.4s%5d",
+             keyword,
+             method ? method : "",
+             zno);
+}
+
+// ─── Main export function ─────────────────────────────────────────────────────
+int m5_export_job(FILE *f,
+                  const char *job_name,
+                  const record_t *recs,
+                  uint32_t count,
+                  float bench_rl)
+{
+    if (!f || !recs || count == 0) return -1;
+
+    uint32_t addr    = 1;
+    int      zno     = 1;
+    char     info[28];
+
+    // Running distance totals for KD2 closing record
+    float db = 0.0f, df = 0.0f;
+
+    // Setup tracking
+    uint32_t setup_no   = 0;
+    char     cur_method[5]  = "BF";
+    char     line_method[5] = "BF";  // method used in Start-Line header
+    int      first_setup    = 1;
+
+    // Determine first method from first valid record
+    for (uint32_t i = 0; i < count; i++) {
+        if (recs[i].valid && !recs[i].voided) {
+            strncpy(line_method, infer_method(recs[i].sight),
+                    sizeof(line_method) - 1);
+            strncpy(cur_method,  line_method, sizeof(cur_method) - 1);
+            break;
+        }
+    }
+
+    ESP_LOGI(TAG, "M5 export: job=%s count=%lu bench=%.4f",
+             job_name, (unsigned long)count, bench_rl);
+
+    // ── TO: Start-Line ────────────────────────────────────────────────────────
+    make_info_to(info, "Start-Line", line_method, zno);
+    write_line(f, &addr, "TO ", info,
+               NULL,0, NULL,0, NULL,0);
+
+    // ── KD1: Opening BM reference height ──────────────────────────────────────
+    // Find name of first BS record
+    const char *bm_name = "BM001";
+    for (uint32_t i = 0; i < count; i++) {
+        if (recs[i].valid && !recs[i].voided && opens_setup(recs[i].sight)) {
+            bm_name = recs[i].name;
+            break;
+        }
+    }
+    make_info_kd(info, bm_name, 0, zno);
+    write_line(f, &addr, "KD1", info,
+               NULL,0, NULL,0, "Z ", bench_rl);
+
+    // ── Walk all records ───────────────────────────────────────────────────────
+    for (uint32_t i = 0; i < count; i++) {
+        const record_t *r = &recs[i];
+        if (!r->valid || r->voided) continue;
+
+        sight_type_t s = r->sight;
+        const char  *m = infer_method(s);
+
+        // ── Detect new setup ──────────────────────────────────────────────────
+        if (opens_setup(s)) {
+            if (!first_setup && strcmp(m, cur_method) != 0) {
+                // Method changed — insert Cont-Line
+                make_info_to(info, "Cont-Line", NULL, zno);
+                write_line(f, &addr, "TO ", info,
+                           NULL,0, NULL,0, NULL,0);
+                ESP_LOGI(TAG, "Cont-Line: setup %lu method %s->%s",
+                         (unsigned long)setup_no, cur_method, m);
+            }
+            setup_no++;
+            strncpy(cur_method, m, sizeof(cur_method) - 1);
+            first_setup = 0;
+        }
+
+        // Sequence number within setup (for info block)
+        int seq = 0;
+        switch (s) {
+            case SIGHT_BS:  seq = 1; break;
+            case SIGHT_BS1: seq = 1; break;
+            case SIGHT_FS:  seq = 2; break;
+            case SIGHT_FS1: seq = 2; break;
+            case SIGHT_FS2: seq = 3; break;
+            case SIGHT_BS2: seq = 4; break;
+            case SIGHT_IS:  seq = 2; break;
+            default:        seq = 1; break;
+        }
+
+        make_info_kd(info, r->name, seq, zno);
+
+        switch (s) {
+
+            // ── BS (BF backsight): Rb + HD ────────────────────────────────────
+            case SIGHT_BS:
+                db += r->distance;
+                write_line(f, &addr, "KD1", info,
+                           "Rb", r->staff,    "HD", r->distance, NULL,0);
+                break;
+
+            // ── FS (BF foresight): Rf + HD, then Z ───────────────────────────
+            case SIGHT_FS:
+                df += r->distance;
+                write_line(f, &addr, "KD1", info,
+                           "Rf", r->staff,    "HD", r->distance, NULL,0);
+                // Z record: TP elevation
+                make_info_kd(info, r->name, 0, zno);
+                write_line(f, &addr, "KD1", info,
+                           NULL,0, NULL,0, "Z ", r->rl);
+                break;
+
+            // ── IS: Rz + HD + Z ───────────────────────────────────────────────
+            case SIGHT_IS:
+                write_line(f, &addr, "KD1", info,
+                           "Rz", r->staff,    "HD", r->distance, "Z ", r->rl);
+                break;
+
+            // ── BS1 (BFFB backsight 1): Rb + HD ──────────────────────────────
+            case SIGHT_BS1:
+                db += r->distance;
+                write_line(f, &addr, "KD1", info,
+                           "Rb", r->staff,    "HD", r->distance, NULL,0);
+                break;
+
+            // ── FS1 (BFFB foresight 1): Rf + HD ──────────────────────────────
+            case SIGHT_FS1:
+                df += r->distance;
+                write_line(f, &addr, "KD1", info,
+                           "Rf", r->staff,    "HD", r->distance, NULL,0);
+                break;
+
+            // ── FS2 (BFFB foresight 2): Rf + HD, then Z ──────────────────────
+            case SIGHT_FS2:
+                df += r->distance;
+                write_line(f, &addr, "KD1", info,
+                           "Rf", r->staff,    "HD", r->distance, NULL,0);
+                // Z with mean RL (already in r->rl from survey_recalc BS2 back-fill)
+                make_info_kd(info, r->name, 0, zno);
+                write_line(f, &addr, "KD1", info,
+                           NULL,0, NULL,0, "Z ", r->rl);
+                break;
+
+            // ── BS2 (BFFB sinking check): Rb + HD only, no Z ─────────────────
+            case SIGHT_BS2:
+                write_line(f, &addr, "KD1", info,
+                           "Rb", r->staff,    "HD", r->distance, NULL,0);
+                break;
+
+            default: break;
+        }
+    }
+
+    // ── KD2: Closing record — Db + Df + final RL ──────────────────────────────
+    // Find last valid FS/FS2/BS2 RL as closing elevation
+    float closing_rl = bench_rl;
+    const char *closing_name = bm_name;
+    for (int i = (int)count - 1; i >= 0; i--) {
+        if (!recs[i].valid || recs[i].voided) continue;
+        sight_type_t ls = recs[i].sight;
+        if (ls == SIGHT_FS || ls == SIGHT_FS2 || ls == SIGHT_BS2) {
+            closing_rl   = recs[i].rl;
+            closing_name = recs[i].name;
+            break;
+        }
+    }
+
+    make_info_kd(info, closing_name, 0, zno);
+    write_line(f, &addr, "KD2", info,
+               "Db", db,         "Df", df,  "Z ", closing_rl);
+
+    // ── TO: End-Line ──────────────────────────────────────────────────────────
+    make_info_to(info, "End-Line", NULL, zno);
+    write_line(f, &addr, "TO ", info,
+               NULL,0, NULL,0, NULL,0);
+
+    int total = (int)(addr - 1);
+    ESP_LOGI(TAG, "M5 done: %d lines  Db=%.3f  Df=%.3f  close=%.4f",
+             total, db, df, closing_rl);
+    return total;
+}

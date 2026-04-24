@@ -46,3 +46,34 @@ esp_err_t storage_delete_job(const char *jobname);
 
 /** Get CSV file size in bytes. */
 size_t storage_csv_size(const char *jobname);
+// ─── Point comments (.notes file) ────────────────────────────────────────────
+// Key: name + sight + setup_no  (e.g. "BM001,BS1,1")
+// Format: name,sight,setup_no,comment text (27 chars max)
+// Comments are optional field annotations — stored separately from CSV.
+
+#define MAX_COMMENT_LEN  27   // fits one M5 TO record info block
+#define MAX_NOTES        50   // max comments per job
+
+/** Save or update a comment. Pass empty string to delete. */
+esp_err_t storage_save_note(const char *job_name,
+                             const char *point_name,
+                             const char *sight,
+                             uint32_t    setup_no,
+                             const char *comment);
+
+/** Get comment for a specific name+sight+setup_no. */
+esp_err_t storage_get_note(const char *job_name,
+                            const char *point_name,
+                            const char *sight,
+                            uint32_t    setup_no,
+                            char *buf, size_t len);
+
+/** Load all notes into arrays for M5 export.
+ *  Returns count of notes loaded. */
+int storage_load_notes(const char *job_name,
+                       char  point_names[][MAX_POINT_NAME],
+                       char  sights[][4],
+                       uint32_t setup_nos[],
+                       char  comments[][MAX_COMMENT_LEN + 1],
+                       int   max);
+

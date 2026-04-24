@@ -74,6 +74,7 @@ static void update_current_from_records(void)
     // Restore current HI/RL from last valid non-voided record
     s_job.current_hi = s_job.bench_rl;
     s_job.current_rl = s_job.bench_rl;
+    s_job.current_setup_no = 0;
     for (int i = (int)s_count - 1; i >= 0; i--) {
         if (s_records[i].valid && !s_records[i].voided) {
             s_job.current_hi = s_records[i].hi;
@@ -176,6 +177,10 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
         return ESP_ERR_NO_MEM;
     }
 
+    if (sight == SIGHT_BS || sight == SIGHT_BS1)
+        s_job.current_setup_no++;
+
+
     // Calculate HI / RL
     float hi = s_job.current_hi;
     float rl = s_job.current_rl;
@@ -199,6 +204,7 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
 
     record_t r = {
         .index    = s_count + 1,
+        .setup_no = s_job.current_setup_no,
         .sight    = sight,
         .staff    = staff,
         .distance = distance,

@@ -46,6 +46,7 @@ static inline sight_type_t sight_from_str(const char *s) {
 
 typedef struct {
     uint32_t     index;       // 1-based point number
+    uint32_t     setup_no;    // instrument setup group (1, 2, 3...)
     sight_type_t sight;       // BS / IS / FS
     float        staff;       // staff reading in metres (signed)
     float        distance;    // horizontal distance in metres
@@ -63,4 +64,5 @@ typedef struct {
     float    current_hi;           // running Height of Instrument
     float    current_rl;           // running Reduced Level
     uint32_t point_count;          // total saved points
+    uint32_t current_setup_no;     // current instrument setup counter
 } job_t;

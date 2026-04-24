@@ -9,6 +9,7 @@
 #include "../survey/job.h"
 #include "../survey/survey.h"
 #include "../storage/storage.h"
+#include "../storage/m5_export.h"
 #include "../settings.h"
 
 #include "esp_wifi.h"
@@ -120,7 +121,7 @@ static bool json_int(const char *body, const char *key, int *out)
     return ok;
 }
 
-static bool json_bool(const char *body, const char *key, bool *out)
+static bool __attribute__((unused)) json_bool(const char *body, const char *key, bool *out)
 {
     cJSON *root = cJSON_Parse(body);
     if (!root) return false;
@@ -218,13 +219,18 @@ static esp_err_t h_records(httpd_req_t *req)
         const record_t *r = &recs[i];
         if (!r->valid || r->voided) continue;
         char row[320];
+        char note_buf[MAX_COMMENT_LEN + 1] = "";
+        storage_get_note(job_get_info()->name, r->name,
+                         sight_str(r->sight), r->setup_no,
+                         note_buf, sizeof(note_buf));
         snprintf(row, sizeof(row),
-            "%s{\"index\":%lu,\"name\":\"%s\",\"sight\":\"%s\","
+            "%s{\"index\":%lu,\"setup_no\":%lu,\"name\":\"%s\",\"sight\":\"%s\","
             "\"staff\":%.4f,\"distance\":%.3f,"
-            "\"hi\":%.4f,\"rl\":%.4f}",
+            "\"hi\":%.4f,\"rl\":%.4f,\"note\":\"%s\"}",
             first ? "" : ",",
-            (unsigned long)r->index, r->name, sight_str(r->sight),
-            r->staff, r->distance, r->hi, r->rl);
+            (unsigned long)r->index, (unsigned long)r->setup_no,
+            r->name, sight_str(r->sight),
+            r->staff, r->distance, r->hi, r->rl, note_buf);
         httpd_resp_sendstr_chunk(req, row);
         first = false;
     }
@@ -576,6 +582,131 @@ static esp_err_t h_download(httpd_req_t *req)
     return ESP_OK;
 }
 
+
+// ─── GET /api/download/m5 ─────────────────────────────────────────────────────
+// Generates M5 on-the-fly to a temp file, streams it, then deletes it.
+// Query param ?job=NAME optional; defaults to active job.
+static esp_err_t h_download_m5(httpd_req_t *req)
+{
+    char jobname[MAX_JOB_NAME];
+    strncpy(jobname, job_get_info()->name, sizeof(jobname) - 1);
+
+    char query[64] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char tmp[MAX_JOB_NAME] = {0};
+        if (httpd_query_key_value(query, "job", tmp, sizeof(tmp)) == ESP_OK)
+            strncpy(jobname, tmp, sizeof(jobname) - 1);
+    }
+
+    // Write M5 to temp file on SPIFFS
+    char tmp_path[320];
+    snprintf(tmp_path, sizeof(tmp_path), "%s/%s_m5.tmp", SPIFFS_BASE, jobname);
+
+    FILE *tmp_f = fopen(tmp_path, "w");
+    if (!tmp_f) {
+        ESP_LOGE(TAG, "Cannot create M5 temp file: %s", tmp_path);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Temp file error");
+        return ESP_FAIL;
+    }
+
+    job_lock();
+    int lines = m5_export_job(tmp_f,
+                               jobname,
+                               job_get_records(),
+                               job_get_count(),
+                               job_get_info()->bench_rl);
+    job_unlock();
+    fclose(tmp_f);
+
+    if (lines <= 0) {
+        remove(tmp_path);
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "No records");
+        return ESP_FAIL;
+    }
+
+    // Stream temp file to browser
+    FILE *f = fopen(tmp_path, "r");
+    if (!f) {
+        remove(tmp_path);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Read error");
+        return ESP_FAIL;
+    }
+
+    char disp[64];
+    snprintf(disp, sizeof(disp), "attachment; filename=\"%s.m5\"", jobname);
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Content-Disposition", disp);
+
+    char buf[256]; size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        httpd_resp_send_chunk(req, buf, n);
+    fclose(f);
+    httpd_resp_send_chunk(req, NULL, 0);
+
+    remove(tmp_path);
+    ESP_LOGI(TAG, "M5 sent: %s (%d lines)", jobname, lines);
+    return ESP_OK;
+}
+
+
+// ─── GET /api/note ────────────────────────────────────────────────────────────
+// ?name=BM001&sight=BS1&setup=1
+static esp_err_t h_note_get(httpd_req_t *req)
+{
+    char query[128] = {0};
+    char name[MAX_POINT_NAME] = {0};
+    char sight[4] = {0};
+    char setup_str[12] = {0};
+    uint32_t setup_no = 0;
+
+    httpd_req_get_url_query_str(req, query, sizeof(query));
+    httpd_query_key_value(query, "name",  name,      sizeof(name));
+    httpd_query_key_value(query, "sight", sight,     sizeof(sight));
+    httpd_query_key_value(query, "setup", setup_str, sizeof(setup_str));
+    if (strlen(setup_str)) setup_no = (uint32_t)atoi(setup_str);
+
+    char note[MAX_COMMENT_LEN + 1] = "";
+    storage_get_note(job_get_info()->name, name, sight, setup_no,
+                     note, sizeof(note));
+
+    char buf[80];
+    snprintf(buf, sizeof(buf), "{\"note\":\"%s\"}", note);
+    send_json(req, buf);
+    return ESP_OK;
+}
+
+// ─── POST /api/note ───────────────────────────────────────────────────────────
+// body: {"name":"BM001","sight":"BS1","setup_no":1,"note":"comment text"}
+static esp_err_t h_note_post(httpd_req_t *req)
+{
+    char body[160] = {0};
+    int len = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (len <= 0) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body"); return ESP_FAIL; }
+
+    char name[MAX_POINT_NAME] = {0};
+    char sight[4] = {0};
+    char note[MAX_COMMENT_LEN + 1] = {0};
+    uint32_t setup_no = 0;
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON"); return ESP_FAIL; }
+
+    cJSON *jname  = cJSON_GetObjectItem(root, "name");
+    cJSON *jsight = cJSON_GetObjectItem(root, "sight");
+    cJSON *jsetup = cJSON_GetObjectItem(root, "setup_no");
+    cJSON *jnote  = cJSON_GetObjectItem(root, "note");
+
+    if (jname  && cJSON_IsString(jname))  strncpy(name,  jname->valuestring,  sizeof(name)-1);
+    if (jsight && cJSON_IsString(jsight)) strncpy(sight, jsight->valuestring, sizeof(sight)-1);
+    if (jsetup && cJSON_IsNumber(jsetup)) setup_no = (uint32_t)jsetup->valuedouble;
+    if (jnote  && cJSON_IsString(jnote))  strncpy(note,  jnote->valuestring,  sizeof(note)-1);
+    cJSON_Delete(root);
+
+    storage_save_note(job_get_info()->name, name, sight, setup_no, note);
+    send_json(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 // ─── GET /api/misclose ────────────────────────────────────────────────────────
 static esp_err_t h_misclose(httpd_req_t *req)
 {
@@ -811,6 +942,9 @@ esp_err_t web_server_start(void)
         { "/api/records",       HTTP_GET,  h_records,       NULL },
         { "/api/jobs",          HTTP_GET,  h_jobs,          NULL },
         { "/api/download",      HTTP_GET,  h_download,      NULL },
+        { "/api/download/m5",   HTTP_GET,  h_download_m5,   NULL },
+        { "/api/note",          HTTP_GET,  h_note_get,      NULL },
+        { "/api/note",          HTTP_POST, h_note_post,     NULL },
         { "/api/misclose",      HTTP_GET,  h_misclose,      NULL },
         { "/api/settings",      HTTP_GET,  h_settings_get,  NULL },
         { "/api/measure",       HTTP_POST, h_measure,       NULL },
@@ -827,7 +961,7 @@ esp_err_t web_server_start(void)
         { "/api/dblr_repeat",   HTTP_POST, h_dblr_repeat,   NULL },
         { "/api/clear_setup",   HTTP_POST, h_clear_setup,   NULL },
     };
-    for (int i = 0; i < 18; i++)
+    for (int i = 0; i < 21; i++)
         httpd_register_uri_handler(s_httpd, &uris[i]);
 
     ESP_LOGI(TAG, "HTTP ready at http://%s", WIFI_AP_IP);

@@ -6,6 +6,7 @@ idf_component_register(
         "survey/survey.c"
         "survey/job.c"
         "storage/storage.c"
+        "storage/m5_export.c"
         "web/web_server.c"
     INCLUDE_DIRS
         "."
