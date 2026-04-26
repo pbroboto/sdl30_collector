@@ -389,7 +389,7 @@ static const char WEB_UI_HTML[] =
 "      var mi2=m2-1;"
 "      var ltrs=[['B','F','F','B'],['B','F','B','F'],['B','B','F','F']];"
 "      var step2=d.dblr_step||0;"
-"      var curStep=step2>=5?0:step2;"
+"      var curStep=(step2>=5||step2===0)?1:step2;"
 "      var vals=[d.bs1,d.fs1,d.fs2,d.bs2];"
 "      for(var li=1;li<=4;li++){"
 "        var el=document.getElementById('dblr-lbl-'+li);"

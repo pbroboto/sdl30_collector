@@ -423,6 +423,8 @@ static esp_err_t h_job_new(httpd_req_t *req)
     json_float(body, "bench_rl", &bench);
     job_new(name, bench);
     s_next_sight = SIGHT_BS;
+    dblr_reset();
+    s_dblr.step = DBLR_IDLE;
     send_ok(req);
     return ESP_OK;
 }
