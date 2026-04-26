@@ -745,7 +745,7 @@ static const char WEB_UI_HTML[] =
 "      body:JSON.stringify({name:name,bench_rl:bm})});"
 "    document.getElementById('new-job-name').value='';"
 "    document.getElementById('new-job-bm').value='';"
-"    await loadJobs();await refreshStatus();setSightUI('BS');loadRecords();clearReport();"
+"    await loadJobs();await refreshStatus();setSightUI('BS');loadRecords();clearReport();var mr=document.getElementById('meas-result');if(mr)mr.textContent='';"
 "    showToast('Job created: '+name+' - tap Measure to start');"
 "    showTab(0);"
 "  });"
