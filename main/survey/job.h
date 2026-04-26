@@ -46,11 +46,13 @@ esp_err_t job_set_bench(float bench_rl);
  * Add a new measurement point to the active job.
  * Calculates HI/RL, appends to RAM array and SPIFFS CSV.
  *
- * @param sight     BS / IS / FS
- * @param staff     staff reading in metres
- * @param distance  distance in metres
+ * @param sight          BS / IS / FS / BS1 / FS1 / FS2 / BS2
+ * @param staff          staff reading in metres
+ * @param distance       distance in metres
+ * @param override_name  point name to use (NULL or "" = auto-generate)
  */
-esp_err_t job_add_point(sight_type_t sight, float staff, float distance);
+esp_err_t job_add_point(sight_type_t sight, float staff, float distance,
+                        const char *override_name);
 
 /**
  * Delete a record by index (1-based).

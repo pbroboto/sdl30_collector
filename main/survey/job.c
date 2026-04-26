@@ -172,7 +172,8 @@ esp_err_t job_set_bench(float bench_rl)
 }
 
 // ─── Add point ────────────────────────────────────────────────────────────────
-esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
+esp_err_t job_add_point(sight_type_t sight, float staff, float distance,
+                        const char *override_name)
 {
     xSemaphoreTake(s_mtx, portMAX_DELAY);
 
@@ -281,20 +282,22 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
             }
         }
     } else if (sight == SIGHT_FS || sight == SIGHT_FS1) {
-        // Leapfrog: alternate between TP001 and TP002.
-        // Find the current backsight name and use the other TP.
-        char bs_name[MAX_POINT_NAME] = {0};
-        for (int i = (int)s_count - 1; i >= 0; i--) {
-            if (s_records[i].valid && !s_records[i].voided &&
-                (s_records[i].sight == SIGHT_BS || s_records[i].sight == SIGHT_BS1)) {
-                strncpy(bs_name, s_records[i].name, MAX_POINT_NAME-1);
-                break;
+        if (override_name && override_name[0] != '\0') {
+            strncpy(r.name, override_name, MAX_POINT_NAME-1);
+            r.name[MAX_POINT_NAME-1] = '\0';
+        } else {
+            // Sequential auto-name: max existing TP number + 1
+            int max_tp = 0;
+            for (uint32_t i = 0; i < s_count; i++) {
+                if (s_records[i].valid && !s_records[i].voided) {
+                    int tp_num = 0;
+                    if (sscanf(s_records[i].name, "TP%d", &tp_num) == 1) {
+                        if (tp_num > max_tp) max_tp = tp_num;
+                    }
+                }
             }
+            snprintf(r.name, MAX_POINT_NAME, "TP%03d", max_tp + 1);
         }
-        if (strcmp(bs_name, "TP001") == 0)
-            strcpy(r.name, "TP002");
-        else
-            strcpy(r.name, "TP001");
     } else if (sight == SIGHT_FS2) {
         // Copy from FS1 of current setup
         for (int i = (int)s_count - 1; i >= 0; i--) {

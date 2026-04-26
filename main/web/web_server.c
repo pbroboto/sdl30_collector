@@ -296,25 +296,32 @@ static esp_err_t h_measure(httpd_req_t *req)
 
     int method = s_settings.obs_method;
 
+    // Read body once — contains optional sight (BF) and point name (FS shots)
+    char body[128] = {0};
+    read_body(req, body, sizeof(body));
+    char pt_name[MAX_POINT_NAME] = {0};
+    json_str(body, "name", pt_name, sizeof(pt_name));
+
     // ── BF mode (method=0) ────────────────────────────────────────────────
     if (method == 0) {
-        char body[64] = {0};
-        read_body(req, body, sizeof(body));
         char sight_s[4] = "BS";
         json_str(body, "sight", sight_s, sizeof(sight_s));
         sight_type_t sight = sight_from_str(sight_s);
-        job_add_point(sight, staff, distance);
+        const char *name_arg = (sight == SIGHT_FS || sight == SIGHT_IS) ? pt_name : NULL;
+        job_add_point(sight, staff, distance, name_arg);
         const job_t *job = job_get_info();
+        uint32_t cnt = job_get_count();
+        const char *rec_name = (cnt > 0) ? job_get_records()[cnt-1].name : "";
         if (sight == SIGHT_BS)      s_next_sight = SIGHT_FS;
         else if (sight == SIGHT_FS) s_next_sight = SIGHT_BS;
         char resp[256];
         snprintf(resp, sizeof(resp),
             "{\"ok\":true,\"mode\":\"BF\","
-            "\"index\":%lu,\"sight\":\"%s\","
+            "\"index\":%lu,\"sight\":\"%s\",\"name\":\"%s\","
             "\"staff\":%.4f,\"distance\":%.3f,"
             "\"hi\":%.4f,\"rl\":%.4f}",
-            (unsigned long)job_get_count(),
-            sight_str(sight), staff, distance,
+            (unsigned long)cnt,
+            sight_str(sight), rec_name, staff, distance,
             job->current_hi, job->current_rl);
         send_json(req, resp);
         return ESP_OK;
@@ -332,20 +339,20 @@ static esp_err_t h_measure(httpd_req_t *req)
     switch (s_dblr.step) {
         case DBLR_BS1:
             s_dblr.bs1=staff; s_dblr.bs1_dist=distance;
-            job_add_point(SIGHT_BS1, staff, distance);
+            job_add_point(SIGHT_BS1, staff, distance, NULL);
             s_dblr.step=DBLR_FS1; break;
         case DBLR_FS1:
             s_dblr.fs1=staff; s_dblr.fs1_dist=distance;
-            job_add_point(SIGHT_FS1, staff, distance);
+            job_add_point(SIGHT_FS1, staff, distance, pt_name);
             s_dblr.step=DBLR_FS2; break;
         case DBLR_FS2:
             s_dblr.fs2=staff; s_dblr.fs2_dist=distance;
-            job_add_point(SIGHT_FS2, staff, distance);
+            job_add_point(SIGHT_FS2, staff, distance, NULL);
             s_dblr.step=DBLR_BS2; break;
         case DBLR_BS2:
             s_dblr.bs2=staff; s_dblr.bs2_dist=distance;
             // Save BS2 immediately — surveyor sees all 4 records
-            job_add_point(SIGHT_BS2, staff, distance);
+            job_add_point(SIGHT_BS2, staff, distance, NULL);
             // Now calculate PASS/FAIL
             s_dblr.dh1 = s_dblr.bs1 - s_dblr.fs1;
             s_dblr.dh2 = s_dblr.bs2 - s_dblr.fs2;
