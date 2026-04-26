@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
+#include "led_strip.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 
@@ -22,6 +23,7 @@
 #include "web/web_server.h"
 
 static const char *TAG = "MAIN";
+static led_strip_handle_t s_strip = NULL;
 
 // ─── SDL30 connection state (shared with web_server) ─────────────────────────
 bool  g_sdl_ok        = false;
@@ -83,6 +85,23 @@ void app_main(void)
     ESP_LOGI(TAG, "=== SDL30 Collector starting ===");
     ESP_LOGI(TAG, "ESP32-S3-N16  ESP-IDF v5.4");
 
+    // WS2812 onboard LED — turn off (GPIO2)
+    led_strip_config_t strip_cfg = {
+        .strip_gpio_num = 48,
+        .max_leds = 1,
+    };
+    led_strip_rmt_config_t rmt_cfg = {
+        .resolution_hz = 10 * 1000 * 1000,
+        .flags.with_dma = true,
+    };
+    esp_err_t led_err = led_strip_new_rmt_device(&strip_cfg, &rmt_cfg, &s_strip);
+    ESP_LOGI(TAG, "WS2812 init: %d", led_err);
+    if (led_err == ESP_OK) {
+        led_strip_clear(s_strip);
+        led_strip_refresh(s_strip);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        ESP_LOGI(TAG, "WS2812 off");
+    }
     // LED
     gpio_config_t led_cfg = {
         .pin_bit_mask = 1ULL << LED_GPIO,

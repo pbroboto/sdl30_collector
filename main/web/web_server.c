@@ -926,7 +926,7 @@ esp_err_t web_server_start(void)
     wifi_init();
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 20;
+    cfg.max_uri_handlers = 25;
     cfg.stack_size = 24576;
     cfg.send_wait_timeout = 30;
     cfg.recv_wait_timeout = 30;
@@ -961,7 +961,7 @@ esp_err_t web_server_start(void)
         { "/api/dblr_repeat",   HTTP_POST, h_dblr_repeat,   NULL },
         { "/api/clear_setup",   HTTP_POST, h_clear_setup,   NULL },
     };
-    for (int i = 0; i < 21; i++)
+    for (int i = 0; i < 23; i++)
         httpd_register_uri_handler(s_httpd, &uris[i]);
 
     ESP_LOGI(TAG, "HTTP ready at http://%s", WIFI_AP_IP);

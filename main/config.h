@@ -39,7 +39,7 @@
 #define DEF_BLOCK_ON        false
 
 // ─── Hardware ─────────────────────────────────────────────────────────────────
-#define LED_GPIO            GPIO_NUM_2
+#define LED_GPIO            GPIO_NUM_4
 
 // ─── FreeRTOS task priorities ─────────────────────────────────────────────────
 #define TASK_PRIO_SDL       5
