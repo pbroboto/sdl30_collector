@@ -13,6 +13,7 @@
 #include "../settings.h"
 
 #include "esp_wifi.h"
+#include "esp_mac.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_http_server.h"
@@ -825,18 +826,23 @@ static void wifi_init(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
 
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+    char ssid[32];
+    snprintf(ssid, sizeof(ssid), "%s_%02X%02X%02X", WIFI_AP_SSID, mac[3], mac[4], mac[5]);
+
     wifi_config_t ap = { .ap = {
-        .ssid           = WIFI_AP_SSID,
         .password       = WIFI_AP_PASS,
-        .ssid_len       = strlen(WIFI_AP_SSID),
+        .ssid_len       = (uint8_t)strlen(ssid),
         .channel        = WIFI_AP_CHANNEL,
         .authmode       = WIFI_AUTH_WPA2_PSK,
         .max_connection = WIFI_AP_MAX_CONN,
     }};
+    memcpy(ap.ap.ssid, ssid, strlen(ssid));
     esp_wifi_set_mode(WIFI_MODE_AP);
     esp_wifi_set_config(WIFI_IF_AP, &ap);
     esp_wifi_start();
-    ESP_LOGI(TAG, "WiFi AP: SSID=%s  IP=%s", WIFI_AP_SSID, WIFI_AP_IP);
+    ESP_LOGI(TAG, "WiFi AP: SSID=%s  IP=%s", ssid, WIFI_AP_IP);
 }
 
 // ─── GET /api/files ─────────────────────────────────────────────────────────

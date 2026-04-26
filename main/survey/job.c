@@ -59,7 +59,9 @@ esp_err_t job_init(void)
     // Load meta and records from SPIFFS
     if (storage_load_meta(&s_job) == ESP_OK) {
         s_count = storage_load_records(&s_job, s_records, MAX_POINTS);
+        float carry = survey_recalc(s_records, s_count, s_job.bench_rl);
         update_current_from_records();
+        s_job.current_rl = carry;
         ESP_LOGI(TAG, "Restored job: %s  BM=%.4f  %lu records",
                  s_job.name, s_job.bench_rl, (unsigned long)s_count);
     } else {
@@ -77,8 +79,9 @@ static void update_current_from_records(void)
     s_job.current_setup_no = 0;
     for (int i = (int)s_count - 1; i >= 0; i--) {
         if (s_records[i].valid && !s_records[i].voided) {
-            s_job.current_hi = s_records[i].hi;
-            s_job.current_rl = s_records[i].rl;
+            s_job.current_hi       = s_records[i].hi;
+            s_job.current_rl       = s_records[i].rl;
+            s_job.current_setup_no = s_records[i].setup_no;
             break;
         }
     }
@@ -122,7 +125,9 @@ esp_err_t job_select(const char *name)
     storage_load_meta(&s_job);
     s_count = storage_load_records(&s_job, s_records, MAX_POINTS);
     s_job.point_count = s_count;
+    float carry = survey_recalc(s_records, s_count, s_job.bench_rl);
     update_current_from_records();
+    s_job.current_rl = carry;
     xSemaphoreGive(s_mtx);
 
     save_active_job_name();
@@ -184,21 +189,48 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
     // Calculate HI / RL
     float hi = s_job.current_hi;
     float rl = s_job.current_rl;
+    float carry_rl = rl;  // rl to propagate to next setup (may differ from r->rl for BS2)
 
     switch (sight) {
         case SIGHT_BS:
         case SIGHT_BS1:
             hi = rl + staff;
+            carry_rl = rl;
             break;
-        case SIGHT_BS2:
-            // BS2 is a check reading on same BM as BS1 - keep HI, compute check RL
+        case SIGHT_BS2: {
+            // Store sinking check RL in the record
             rl = hi - staff;
+            carry_rl = rl;  // fallback if mean can't be computed
+            // Compute mean RL to carry forward: prev_BM + (bs_mean - fs_mean)
+            float bs1_staff = 0.0f, fs1_staff = 0.0f, fs2_staff = 0.0f;
+            float prev_bm_rl = s_job.current_rl;  // RL at last BS1 position (approx)
+            int found_bs1 = 0, found_fs2 = 0, found_fs1 = 0;
+            for (int j = (int)s_count - 1; j >= 0; j--) {
+                if (!s_records[j].valid || s_records[j].voided) continue;
+                if (!found_fs2 && s_records[j].sight == SIGHT_FS2) {
+                    fs2_staff = s_records[j].staff; found_fs2 = 1;
+                } else if (!found_fs1 && found_fs2 && s_records[j].sight == SIGHT_FS1) {
+                    fs1_staff = s_records[j].staff; found_fs1 = 1;
+                } else if (!found_bs1 && s_records[j].sight == SIGHT_BS1) {
+                    bs1_staff  = s_records[j].staff;
+                    prev_bm_rl = s_records[j].rl;  // RL before this setup
+                    found_bs1  = 1;
+                }
+                if (found_bs1 && found_fs1 && found_fs2) break;
+            }
+            if (found_bs1 && found_fs1 && found_fs2) {
+                float bs_mean = (bs1_staff + staff) / 2.0f;
+                float fs_mean = (fs1_staff + fs2_staff) / 2.0f;
+                carry_rl = prev_bm_rl + (bs_mean - fs_mean);
+            }
             break;
+        }
         case SIGHT_IS:
         case SIGHT_FS:
         case SIGHT_FS1:
         case SIGHT_FS2:
             rl = hi - staff;
+            carry_rl = rl;
             break;
     }
 
@@ -249,17 +281,20 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
             }
         }
     } else if (sight == SIGHT_FS || sight == SIGHT_FS1) {
-        // Auto-increment TP name
-        int max_tp = 0;
-        for (uint32_t i = 0; i < s_count; i++) {
-            if (s_records[i].valid && !s_records[i].voided) {
-                int tp_num = 0;
-                if (sscanf(s_records[i].name, "TP%d", &tp_num) == 1) {
-                    if (tp_num > max_tp) max_tp = tp_num;
-                }
+        // Leapfrog: alternate between TP001 and TP002.
+        // Find the current backsight name and use the other TP.
+        char bs_name[MAX_POINT_NAME] = {0};
+        for (int i = (int)s_count - 1; i >= 0; i--) {
+            if (s_records[i].valid && !s_records[i].voided &&
+                (s_records[i].sight == SIGHT_BS || s_records[i].sight == SIGHT_BS1)) {
+                strncpy(bs_name, s_records[i].name, MAX_POINT_NAME-1);
+                break;
             }
         }
-        snprintf(r.name, MAX_POINT_NAME, "TP%03d", max_tp + 1);
+        if (strcmp(bs_name, "TP001") == 0)
+            strcpy(r.name, "TP002");
+        else
+            strcpy(r.name, "TP001");
     } else if (sight == SIGHT_FS2) {
         // Copy from FS1 of current setup
         for (int i = (int)s_count - 1; i >= 0; i--) {
@@ -286,7 +321,7 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance)
 
     s_records[s_count++] = r;
     s_job.current_hi   = hi;
-    s_job.current_rl   = rl;
+    s_job.current_rl   = carry_rl;
     s_job.point_count  = s_count;
 
     xSemaphoreGive(s_mtx);

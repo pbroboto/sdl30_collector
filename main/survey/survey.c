@@ -41,7 +41,7 @@ static bool is_setup_start(sight_type_t s) {
     return s == SIGHT_BS || s == SIGHT_BS1;
 }
 
-void survey_recalc(record_t *recs, uint32_t count, float bench_rl)
+float survey_recalc(record_t *recs, uint32_t count, float bench_rl)
 {
     float hi      = bench_rl;
     float rl      = bench_rl;    // current running RL
@@ -136,6 +136,7 @@ void survey_recalc(record_t *recs, uint32_t count, float bench_rl)
             default: break;
         }
     }
+    return rl;
 }
 
 float survey_misclose(const record_t *recs, uint32_t count,

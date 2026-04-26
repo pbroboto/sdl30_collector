@@ -18,7 +18,9 @@
  *
  * Call this after any edit, delete, or benchmark change.
  */
-void survey_recalc(record_t *recs, uint32_t count, float bench_rl);
+// Returns the final carry-forward RL (mean RL after last complete setup).
+// Use this to seed current_rl when loading a job from storage.
+float survey_recalc(record_t *recs, uint32_t count, float bench_rl);
 
 /**
  * Calculate misclose for a level run.

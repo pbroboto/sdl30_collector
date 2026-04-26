@@ -8,9 +8,12 @@
 ## Known unresolved issues
 - M5 Z record placement for BFFB — code SHOULD write Z after BS2 with mean RL
   but this was never tested with real data
-- Notes backend exists (storage_save_note/get_note/load_notes)
-  but note TO records are NOT yet inserted into M5 export output
 - Web UI note ● indicator + editNote() added but not tested
+
+## Resolved
+- Note TO records: now emitted after each KD1 measurement block when a note
+  exists for that (name, sight, setup_no). Format: %-23.23s%4d (comment + zno).
+  Static arrays used to avoid stack pressure. Build verified clean.
 
 ## Next steps for new Claude
 1. Flash firmware: idf.py flash
