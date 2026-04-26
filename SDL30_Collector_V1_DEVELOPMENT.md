@@ -1,4 +1,4 @@
-# SDL30 Collector V1 — Development Log
+# SDL30 Collector — Development Log
 
 ## Overview
 
@@ -12,7 +12,7 @@ ESP32-based wireless data collector for Sokkia SDL30 digital level, replacing th
 
 ## Hardware
 
-### Bill of Materials
+### V1 — ESP32-WROOM-32
 
 | Component | Part | Price (THB) |
 |-----------|------|-------------|
@@ -24,7 +24,16 @@ ESP32-based wireless data collector for Sokkia SDL30 digital level, replacing th
 | Enclosure, wiring | ABS box 120×97×40mm | 100 |
 | **TOTAL** | | **~650-700 THB** |
 
-### Wiring
+### V2 — ESP32-S3-N16 (current)
+
+Same BOM, MCU upgraded to ESP32-S3-N16R8:
+- 16MB flash → ~13MB SPIFFS → ~295,000 records possible
+- 8MB PSRAM → larger web UI without size concerns
+- Dual-core LX7 @ 240MHz → faster UI response
+- USB-OTG support (direct PC connection possible)
+- Same GPIO 16/17 UART pins — no wiring changes needed
+
+### Wiring (both versions)
 
 ```
 SDL30 (Hirose 6-pin) → USB-A cable → RS-232 breakout:
@@ -94,9 +103,10 @@ main/
 │   ├── sdl30.c/h           # UART protocol, adaptive timeout
 ├── survey/
 │   ├── job.c/h             # Job management, auto-naming, HI/RL calc
-│   ├── survey.c/h          # BFFB state machine, PASS/FAIL logic
+│   ├── survey.c/h          # Pure leveling arithmetic (no hardware deps)
 ├── storage/
 │   ├── storage.c/h         # SPIFFS, CSV append/rewrite, meta files
+│   ├── m5_export.c/h       # Zeiss/DiNi M5 format export
 └── web/
     ├── web_server.c/h      # REST API endpoints
     └── web_ui.h            # Single-page web app (HTML/CSS/JS in C string)
@@ -109,101 +119,135 @@ main/
 - **BFFB** (3rd order) — BS1, FS1, FS2, BS2 with sinking check
 
 **Point Name System:**
-- Auto-generated: BM001 (first BS), TP001/TP002... (each new FS)
-- BS2 copies from BS1 of current setup (same BM)
-- FS2 copies from FS1 of current setup (same TP)
-- Manual edit via web UI (tap name cell → prompt)
+- Auto-generated: BM001 (first BS), TP001/TP002 leapfrog (each new FS)
+- BS2 copies from BS1 of current setup
+- FS2 copies from FS1 of current setup
+- Manual edit via web UI (tap name cell in Records tab → prompt)
 - `name[24]` field in `record_t` struct
 
 **Job Management:**
 - Multiple jobs with meta file (bench_rl, point_count)
-- CSV auto-saves each record
-- Restore job on reboot
-- Jobs tab for switch/delete
+- CSV auto-saves each record immediately on measurement
+- All HI/RL recalculated from staff readings on every job load
+- Restore last active job on reboot
 
 **Web UI (5-tab SPA):**
 - Measure (live reading + method-specific UI)
-- Records (scrollable table with edit)
-- Jobs (switch/create/delete)
-- Report (closed-loop misclosure)
+- Records (scrollable table with name/note edit)
+- Jobs (switch/create/delete/download CSV)
+- Report (closed-loop misclosure, M5 export)
 - Settings (method, limits, baud)
 
 **Safety Checks:**
-- Station check: |BS-FS| per setup ≤ 2mm (configurable)
-- Distance balance: |ΣdBS-ΣdFS| ≤ 10m (configurable)
-- BFFB double-reading check: |BS1-BS2| and |FS1-FS2| ≤ limit
-- BFFB sinking check: BS2 RL vs opening BM
+- Station check: |dH1 - dH2| per setup ≤ limit (configurable, default 3mm)
+- Distance balance: |ΣdBS - ΣdFS| ≤ 10m (configurable)
+- BFFB PASS/FAIL auto-deletes 4 records on fail, prompts retry
 
 ---
 
-## BFFB Method Details
+## BFFB Method — Arithmetic Reference
 
-### Reading Sequence
-
-```
-Setup N:
-  BS1 — aim at BM, read staff
-  FS1 — turn to TP, read staff
-  FS2 — re-read TP (check)
-  BS2 — turn back to BM (sinking check)
-```
-
-### Arithmetic
+### Reading Sequence per Setup
 
 ```
-Per-setup mean staff:
-  BS_mean = (BS1 + BS2) / 2
-  FS_mean = (FS1 + FS2) / 2
-
-Elevation change per setup:
-  ΔH = BS_mean - FS_mean
-
-HI after setup:
-  HI = previous_RL + BS_mean
-
-TP RL:
-  TP_RL = HI - FS_mean
-
-BS2 sinking check RL:
-  BS2_RL = HI - BS2_staff
-  Compare to BM_RL — if differs > 1-2mm, tripod sank
+BS1 — aim at rear staff (BM or previous TP), read staff
+FS1 — turn to forward staff (new TP), read staff
+FS2 — re-read forward staff (independent check)
+BS2 — turn back to rear staff (instrument sinking check)
 ```
 
-### PASS/FAIL Criteria
+### Formulas
+
+**Per-record:**
+
+| Record | HI | RL stored |
+|--------|----|-----------|
+| BS1 | `prev_RL + BS1_staff` | `prev_RL` (instrument station RL) |
+| FS1 | (same HI) | `HI − FS1_staff` |
+| FS2 | (same HI) | `HI − FS2_staff` |
+| BS2 | (same HI) | `prev_RL + BS1_staff − BS2_staff` (sinking check only) |
+
+**Mean RL carried to next setup (critical — this is the only value that propagates):**
 
 ```
-Station check: |BS1 - FS1| reading spread within limit
-Double-reading: |BS1-BS2| and |FS1-FS2| ≤ 0.001m typical
-Sinking check: |BS2_RL - BM_RL| ≤ max_station_mm
+bs_mean = (BS1_staff + BS2_staff) / 2
+fs_mean = (FS1_staff + FS2_staff) / 2
+mean_RL = prev_RL + (bs_mean − fs_mean)
 ```
+
+> **Important:** The BS2 record's stored RL is the *sinking check* only.
+> The `mean_RL` is what seeds the next setup's `prev_RL`.
+> `survey_recalc()` returns this value; job load uses the return value
+> to seed `current_rl`, NOT the last record's stored RL.
+
+### Example (from field test)
+
+| Setup | prev_RL | bs_mean | fs_mean | dH | mean_RL → next |
+|-------|---------|---------|---------|-----|----------------|
+| Set 1 | 50.0000 | 1.0037 | 1.0389 | −0.0352 | **49.9648** |
+| Set 2 | 49.9648 | 1.0876 | 1.0318 | +0.0558 | **50.0206** |
+| Set 3 | 50.0206 | 1.0704 | 1.0933 | −0.0229 | **49.9977** |
 
 ---
 
-## Critical Build Fixes
+## CSV Storage Format
 
-### Buffer sizes (Armbian/ESP-IDF)
-
-```bash
-python3 -c "
-c = open('main/web/web_server.c').read()
-c = c.replace('char path[80]', 'char path[320]')
-c = c.replace('char path[128]', 'char path[320]')
-c = c.replace('char row[128]', 'char row[512]')
-open('main/web/web_server.c','w').write(c)
-"
-```
-
-### Format specifiers (xtensa toolchain)
-
-`uint32_t` must use `%lu` with `(unsigned long)` cast, not `%u`.
-
-### SPIFFS CSV format (8 columns)
+### Header (9 columns)
 
 ```
-Point, Name, Sight, Staff(m), Distance(m), HI(m), RL(m), Status
+Point,Setup,Name,Sight,Staff(m),Distance(m),HI(m),RL(m),Status
 ```
 
-`sscanf` format: `"%lu,%23[^,],%3[^,],%f,%f,%f,%f,%7s"` expecting 8 return values.
+`sscanf` format: `"%lu,%lu,%23[^,],%3[^,],%f,%f,%f,%f,%7s"` — 9 return values.
+
+> Note: HI and RL stored in CSV are the values at time of measurement.
+> On every job load, `survey_recalc()` recomputes all HI/RL from staff
+> readings. The CSV values are overwritten in memory but not rewritten
+> to disk unless a void/edit operation occurs.
+
+---
+
+## Critical Bug Fixes (V2 session)
+
+### RL carry-forward after BFFB setup
+
+**Problem:** After BS2, `current_rl` was set to the sinking-check RL
+(e.g. 50.0000) instead of the mean RL (e.g. 49.9648). Next setup's
+BS1 computed wrong HI.
+
+**Fix:** `job_add_point()` computes mean RL (`carry_rl`) from BS1/FS1/FS2/BS2
+staff readings when BS2 is processed. `s_job.current_rl = carry_rl`.
+
+### RL wrong when loading existing job
+
+**Problem:** `survey_recalc()` computed correct mean RL internally but
+didn't expose it. `update_current_from_records()` read the last record's
+stored RL (sinking check) instead of the mean.
+
+**Fix:** `survey_recalc()` now returns `float` — the final carry RL.
+`job_init()` and `job_select()` assign this return value to `current_rl`
+after calling `update_current_from_records()`.
+
+### setup_no not restored on job load
+
+**Problem:** `update_current_from_records()` reset `current_setup_no = 0`
+and never restored it from records. Next BS1 after load incremented from
+0 → 1 instead of the correct next number.
+
+**Fix:** Restore `current_setup_no` from the last valid record in
+`update_current_from_records()`.
+
+### Nav bar obscuring last record (mobile)
+
+**Problem:** Records table had `max-height:380px` with its own scroll.
+On Android, the fixed bottom nav bar overlapped the last visible row.
+
+**Fix:**
+- Removed `max-height` from records table wrapper — page scrolls as one unit
+- Added `viewport-fit=cover` and `env(safe-area-inset-bottom)` to handle
+  Android gesture navigation bar
+- `Cache-Control: no-store` meta tag prevents browser caching stale HTML
+  between firmware flashes
 
 ---
 
@@ -215,37 +259,39 @@ Point, Name, Sight, Staff(m), Distance(m), HI(m), RL(m), Status
 4. **UI element removal needs null checks** — loops referencing removed DOM elements crash silently
 5. **Loose solder wire looks like timeout** — always check hardware before blaming software
 6. **Adaptive timeout beats fixed timeout** — SDL30 sends intermediate bytes during measurement; reset timer on byte arrival
-7. **HI/RL should be computed on display, not stored** — allows fixes to apply to existing data
-8. **Optimistic UI (auto-save on change) better than Save button** — field use favors fewer taps
-9. **Laptop USB provides ~500mA — insufficient for ESP32 WiFi peaks** — use phone charger (2A+) for reliable power
+7. **HI/RL must be recomputed on load, not just stored** — `survey_recalc()` must run on every job open; stored CSV values are stale after any bug fix
+8. **The mean RL after BFFB is NOT in any record** — it lives only as the return value of `survey_recalc()`; if you lose it, the next setup starts from the sinking-check RL (wrong)
+9. **`env(safe-area-inset-bottom)` is mandatory for mobile PWAs** — Android gesture bar adds invisible height below the viewport
+10. **Batch fixes before flashing** — each flash requires physically swapping cable between laptop and SDL30+battery; never flash a partial fix
+11. **Optimistic UI (auto-save on change) better than Save button** — field use favors fewer taps
+12. **Laptop USB provides ~500mA — insufficient for ESP32 WiFi peaks** — use phone charger (2A+) for reliable power
+
+---
+
+## Pending / Known Issues
+
+- **TP naming**: leapfrog (TP001/TP002 alternating) implemented but needs
+  rethink. General case requires sequential numbering (TP001, TP002, TP003…)
+  with ability to set a custom name (e.g. ST35) when FS is a named benchmark.
+  Proposed: editable name field in Measure tab pre-populated with next TP.
+- **setup_no in existing CSV**: records saved before the setup_no fix show
+  wrong numbers. `survey_recalc()` does not correct setup_no — only staff
+  readings are ground truth.
+- **OTA firmware update**: partition table has OTA slots. Adding a web UI
+  upload endpoint would eliminate cable-swap for field updates.
 
 ---
 
 ## Git History
 
 ```
-25bdb69 Add Point Name feature (name[24] in record_t)
-d17fa1b Fix setMethodUI crash when mb-2/mb-3 buttons removed
-d73be01 BFFB UI improvements - remove BFBF/BBFF, fix arithmetic, scroll records
-a07c178 BFFB UI - DiNi style highlight, combined sight card, auto-save settings
-7026863 Add BFFB/BFBF/BBFF double-reading methods
-5f95db5 Restore working web_ui.h and web_server.c before BFFB UI
-604f1e4 Fix Jobs tab - custom modal, data-name onclick, meta scan
-771e2f9 Add setup colour coding, delete warning, job restore on reboot
-c68bc28 SDL30 Collector V1 - initial release
+4b45b11 Fix: RL/HI carry-forward, setup_no restore, nav bar, TP naming
+2ea206b Fix: clear measurement display on new job
+971f11b Fix: dblr_step reset to BS1 on new job
+c91426e Fix: URI handlers 23/25, WS2812 init attempt (LED deferred)
+3719439 Fix: setup_no assignment + sight reset on new job
+5122212 V2: Port to ESP32-S3-N16
 ```
-
----
-
-## V2 Roadmap (ESP32-S3-N16)
-
-- 16MB flash → 13MB SPIFFS → 295,000 records possible
-- 8MB PSRAM → larger web UI without size concerns
-- Dual-core LX7 @ 240MHz → faster UI
-- 3-LED status (🔴 error, 🟡 WiFi, 🟢 SDL30)
-- Active buzzer (PASS/FAIL/measure beeps)
-- USB-OTG support (direct PC connection possible)
-- Same GPIO 16/17 UART pins for code compatibility
 
 ---
 
@@ -256,4 +302,4 @@ c68bc28 SDL30 Collector V1 - initial release
 3. Compare with Sokkia SDR33 on same line if available
 4. Test in hot weather (60m distance) — verify adaptive timeout
 5. Test battery life — target 8+ hours continuous use
-
+6. Verify RL carry-forward across setups (check BS1 RL of each new setup)
