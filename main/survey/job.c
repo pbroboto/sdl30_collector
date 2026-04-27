@@ -421,14 +421,57 @@ esp_err_t job_edit_name(uint32_t index, const char *name)
 {
     xSemaphoreTake(s_mtx, portMAX_DELAY);
     esp_err_t ret = ESP_ERR_NOT_FOUND;
+    sight_type_t edited_sight = SIGHT_BS;
+    uint32_t edited_pos = 0;
+
     for (uint32_t i = 0; i < s_count; i++) {
         if (s_records[i].index == index && s_records[i].valid && !s_records[i].voided) {
             strncpy(s_records[i].name, name, MAX_POINT_NAME-1);
             s_records[i].name[MAX_POINT_NAME-1] = '\0';
+            edited_sight = s_records[i].sight;
+            edited_pos   = i;
             ret = ESP_OK;
             break;
         }
     }
+
+    // Sync the paired record: BS1↔BS2, FS1↔FS2.
+    // Search positionally (not by setup_no) so it works even when setup_no numbering
+    // is off due to old firmware data mixed with new.
+    if (ret == ESP_OK) {
+        sight_type_t pair_sight = SIGHT_BS;
+        bool forward = false;  // search direction from edited_pos
+        bool has_pair = true;
+        switch (edited_sight) {
+            case SIGHT_BS1: pair_sight = SIGHT_BS2; forward = true;  break;
+            case SIGHT_BS2: pair_sight = SIGHT_BS1; forward = false; break;
+            case SIGHT_FS1: pair_sight = SIGHT_FS2; forward = true;  break;
+            case SIGHT_FS2: pair_sight = SIGHT_FS1; forward = false; break;
+            default: has_pair = false; break;
+        }
+        if (has_pair) {
+            if (forward) {
+                for (uint32_t i = edited_pos + 1; i < s_count; i++) {
+                    if (s_records[i].valid && !s_records[i].voided &&
+                        s_records[i].sight == pair_sight) {
+                        strncpy(s_records[i].name, name, MAX_POINT_NAME-1);
+                        s_records[i].name[MAX_POINT_NAME-1] = '\0';
+                        break;
+                    }
+                }
+            } else {
+                for (int i = (int)edited_pos - 1; i >= 0; i--) {
+                    if (s_records[i].valid && !s_records[i].voided &&
+                        s_records[i].sight == pair_sight) {
+                        strncpy(s_records[i].name, name, MAX_POINT_NAME-1);
+                        s_records[i].name[MAX_POINT_NAME-1] = '\0';
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     xSemaphoreGive(s_mtx);
     if (ret == ESP_OK) {
         storage_rewrite_csv(&s_job, s_records, s_count);

@@ -738,20 +738,27 @@ static esp_err_t h_misclose(httpd_req_t *req)
     float sum_bs_dist = 0, sum_fs_dist = 0;
     const record_t *recs = job_get_records();
     uint32_t count = job_get_count();
+    // Count unique point names and accumulate distances for both BF and BFFB
+    char unames[50][MAX_POINT_NAME];
+    uint32_t ucount = 0;
     for (uint32_t i = 0; i < count; i++) {
         if (!recs[i].valid || recs[i].voided) continue;
-        if (recs[i].sight == SIGHT_BS) sum_bs_dist += recs[i].distance;
-        if (recs[i].sight == SIGHT_FS) sum_fs_dist += recs[i].distance;
+        sight_type_t s = recs[i].sight;
+        if (s == SIGHT_BS || s == SIGHT_BS1) sum_bs_dist += recs[i].distance;
+        if (s == SIGHT_FS || s == SIGHT_FS1) sum_fs_dist += recs[i].distance;
         if (first_rl == job_get_info()->bench_rl) first_rl = recs[i].rl;
         last_rl = recs[i].rl;
+        // Unique names: count each physical point once (skip FS2/BS2 duplicates)
+        if (s == SIGHT_BS || s == SIGHT_BS1 || s == SIGHT_FS || s == SIGHT_FS1 || s == SIGHT_IS) {
+            bool dup = false;
+            for (uint32_t j = 0; j < ucount; j++)
+                if (strcmp(unames[j], recs[i].name) == 0) { dup = true; break; }
+            if (!dup && ucount < 50) strncpy(unames[ucount++], recs[i].name, MAX_POINT_NAME-1);
+        }
     }
     job_unlock();
 
     float bench_rl = job_get_info()->bench_rl;
-    // Count FS readings as 'points' (turning points)
-    uint32_t fs_count = 0;
-    for (uint32_t i = 0; i < count; i++)
-        if (recs[i].valid && !recs[i].voided && recs[i].sight == SIGHT_FS) fs_count++;
 
     char buf[420];
     snprintf(buf, sizeof(buf),
@@ -763,7 +770,7 @@ static esp_err_t h_misclose(httpd_req_t *req)
         mc, sum_bs, sum_fs,
         bench_rl, bench_rl + sum_bs - sum_fs,
         last_rl,
-        (unsigned long)count, (unsigned long)(fs_count+1),
+        (unsigned long)count, (unsigned long)ucount,
         sum_bs_dist, sum_fs_dist);
     send_json(req, buf);
     return ESP_OK;

@@ -146,7 +146,6 @@ float survey_misclose(const record_t *recs, uint32_t count,
     float s_bs1 = 0.0f, s_bs2 = 0.0f;
     float s_fs1 = 0.0f, s_fs2 = 0.0f;
     float s_bs  = 0.0f, s_fs  = 0.0f;
-    float last_rl = bench_rl;
     int   has_dblr = 0;
 
     for (uint32_t i = 0; i < count; i++) {
@@ -173,16 +172,8 @@ float survey_misclose(const record_t *recs, uint32_t count,
     if (sum_bs) *sum_bs = total_bs;
     if (sum_fs) *sum_fs = total_fs;
 
-    // Last valid RL from FS/FS2/BS2
-    for (int i = (int)count - 1; i >= 0; i--) {
-        const record_t *r = &recs[i];
-        if (!r->valid || r->voided) continue;
-        if (r->sight==SIGHT_FS || r->sight==SIGHT_BS2) {
-            last_rl = r->rl;
-            break;
-        }
-    }
-
     (void)has_dblr;
-    return last_rl - closing_rl;
+    // Misclosure = computed closing elevation − known closing BM
+    // comp_elev = bench_rl + ΣBS − ΣFS  (works for both BF and BFFB)
+    return (bench_rl + total_bs - total_fs) - closing_rl;
 }
