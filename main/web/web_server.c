@@ -939,6 +939,82 @@ static esp_err_t h_dblr_repeat(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* TEST-ONLY: POST /api/import?job=NAME  body=CSV text
+ * Creates a new job and bulk-inserts records from a downloaded CSV file.
+ * Not reachable from the normal UI — used only from the Python import script. */
+static esp_err_t h_import(httpd_req_t *req)
+{
+    char job_name[MAX_JOB_NAME] = {0};
+    char query[64] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+        httpd_query_key_value(query, "job", job_name, sizeof(job_name));
+    if (!job_name[0]) { send_err(req, "job param required"); return ESP_OK; }
+
+    static char buf[4096];
+    int clen = req->content_len;
+    if (clen <= 0 || clen >= (int)sizeof(buf)) {
+        send_err(req, "body too large or empty"); return ESP_OK;
+    }
+    int n = httpd_req_recv(req, buf, clen);
+    if (n <= 0) { send_err(req, "recv failed"); return ESP_OK; }
+    buf[n] = '\0';
+
+    /* Skip header line */
+    char *p = buf;
+    while (*p && *p != '\n') p++;
+    if (*p == '\n') p++;
+
+    /* Extract bench_rl from first data row RL column (col 7) */
+    float bench_rl = 100.0f;
+    {
+        char *nl = strchr(p, '\n');
+        size_t ll = nl ? (size_t)(nl - p) : strlen(p);
+        char tmp[128] = {0};
+        if (ll < sizeof(tmp)) {
+            strncpy(tmp, p, ll);
+            char *tok = strtok(tmp, ",");
+            for (int col = 0; tok && col < 8; col++, tok = strtok(NULL, ","))
+                if (col == 7) { bench_rl = atof(tok); break; }
+        }
+    }
+
+    job_new(job_name, bench_rl);
+    uint32_t added = 0;
+
+    while (*p) {
+        char *nl = strchr(p, '\n');
+        size_t ll = nl ? (size_t)(nl - p) : strlen(p);
+        if (ll == 0 || ll >= 128) { p = nl ? nl + 1 : p + ll; continue; }
+
+        char line[128] = {0};
+        strncpy(line, p, ll);
+        if (ll > 0 && line[ll - 1] == '\r') line[ll - 1] = '\0';
+
+        /* Point,Setup,Name,Sight,Staff,Distance,HI,RL,Status */
+        char cols[6][32] = {0};
+        char *tok = strtok(line, ",");
+        for (int col = 0; tok && col < 6; col++, tok = strtok(NULL, ","))
+            strncpy(cols[col], tok, sizeof(cols[col]) - 1);
+
+        sight_type_t sight = sight_from_str(cols[3]);
+        float staff    = atof(cols[4]);
+        float distance = atof(cols[5]);
+        const char *name = cols[2][0] ? cols[2] : NULL;
+
+        if (staff != 0.0f || distance != 0.0f)
+            job_add_point(sight, staff, distance, name);
+        added++;
+
+        p = nl ? nl + 1 : p + strlen(p);
+    }
+
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"ok\":true,\"imported\":%lu}", (unsigned long)added);
+    ESP_LOGI(TAG, "import: job=%s bench=%.4f records=%lu", job_name, bench_rl, (unsigned long)added);
+    send_json(req, resp);
+    return ESP_OK;
+}
+
 // ─── Start server ─────────────────────────────────────────────────────────────
 esp_err_t web_server_start(void)
 {
@@ -948,7 +1024,7 @@ esp_err_t web_server_start(void)
     wifi_init();
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 25;
+    cfg.max_uri_handlers = 26;
     cfg.stack_size = 24576;
     cfg.send_wait_timeout = 30;
     cfg.recv_wait_timeout = 30;
@@ -982,8 +1058,9 @@ esp_err_t web_server_start(void)
         { "/api/files",         HTTP_GET,  h_files,         NULL },
         { "/api/dblr_repeat",   HTTP_POST, h_dblr_repeat,   NULL },
         { "/api/clear_setup",   HTTP_POST, h_clear_setup,   NULL },
+        { "/api/import",        HTTP_POST, h_import,        NULL },
     };
-    for (int i = 0; i < 23; i++)
+    for (int i = 0; i < 24; i++)
         httpd_register_uri_handler(s_httpd, &uris[i]);
 
     ESP_LOGI(TAG, "HTTP ready at http://%s", WIFI_AP_IP);

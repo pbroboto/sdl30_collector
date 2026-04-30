@@ -271,6 +271,10 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance,
                 }
             }
         }
+        if (override_name && override_name[0] != '\0') {
+            strncpy(r.name, override_name, MAX_POINT_NAME-1);
+            r.name[MAX_POINT_NAME-1] = '\0';
+        }
     } else if (sight == SIGHT_BS2) {
         // Copy from BS1 of current setup (previous BS1 record)
         for (int i = (int)s_count - 1; i >= 0; i--) {
@@ -320,6 +324,10 @@ esp_err_t job_add_point(sight_type_t sight, float staff, float distance,
             }
         }
         snprintf(r.name, MAX_POINT_NAME, "IS%03d", max_is + 1);
+        if (override_name && override_name[0] != '\0') {
+            strncpy(r.name, override_name, MAX_POINT_NAME-1);
+            r.name[MAX_POINT_NAME-1] = '\0';
+        }
     }
 
     s_records[s_count++] = r;

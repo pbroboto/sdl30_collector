@@ -102,13 +102,13 @@ static void write_line(FILE *f, uint32_t *addr,
 {
     char b3[23], b4[23], b5[23];
 
-    if (t3) snprintf(b3, sizeof(b3), "%-2s %14.6f %-4s", t3, v3, M5_M);
+    if (t3) snprintf(b3, sizeof(b3), "%-2s %14.4f %-4s", t3, v3, M5_M);
     else    strncpy(b3, M5_EMPTY, sizeof(b3));
 
-    if (t4) snprintf(b4, sizeof(b4), "%-2s %14.6f %-4s", t4, v4, M5_M);
+    if (t4) snprintf(b4, sizeof(b4), "%-2s %14.4f %-4s", t4, v4, M5_M);
     else    strncpy(b4, M5_EMPTY, sizeof(b4));
 
-    if (t5) snprintf(b5, sizeof(b5), "%-2s %14.6f %-4s", t5, v5, M5_M);
+    if (t5) snprintf(b5, sizeof(b5), "%-2s %14.4f %-4s", t5, v5, M5_M);
     else    strncpy(b5, M5_EMPTY, sizeof(b5));
 
     fprintf(f, "For M5|Adr%5lu|%-3s %-27s|%s|%s|%s| \r\n",
@@ -313,6 +313,7 @@ int m5_export_job(FILE *f,
 
         /* BFFB BS2: Rb + HD, then Z with mean RL */
         case SIGHT_BS2: {
+            db += r->distance;
             write_line(f, &addr, "KD1", info,
                        "Rb", r->staff, "HD", r->distance, NULL,0);
 

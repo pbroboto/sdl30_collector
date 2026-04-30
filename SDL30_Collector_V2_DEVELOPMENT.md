@@ -137,9 +137,9 @@ main/
 
 **Web UI (5-tab SPA):**
 - Measure (live reading + method-specific UI)
-- Records (scrollable table with name/note edit)
+- Records (scrollable table with name/note edit; CSV + M5/Zeiss download)
 - Jobs (switch/create/delete/download CSV)
-- Report (closed-loop misclosure, M5 export)
+- Report (closed-loop misclosure; future CSV/HTML report export)
 - Settings (method, limits, baud)
 
 **Safety Checks:**
@@ -194,6 +194,60 @@ mean_RL = prev_RL + (bs_mean − fs_mean)
 
 ---
 
+## M5 (Zeiss/DiNi) Format Export
+
+### Line Structure (121 bytes per line)
+
+```
+For M5|Adr    N|INFO_BLOCK            |BLOCK3                |BLOCK4                |BLOCK5                |
+```
+
+- `INFO_BLOCK` — 27 chars: `PNo(8) + Code(5) + 6sp + Sno(4) + Zno(4)` for KD1 measurement
+- Each data block — 22 chars: `%-2s %14.4f %-4s` (label, value, unit `m   `)
+- `M5_EMPTY` — 22 chars of spaces when block is unused
+
+### Record Types
+
+| Type | Description |
+|------|-------------|
+| `TO  Start-Line` | File header — address 1 |
+| `KD1 PNo Code Sno Zno` | Measurement — Rb (BS), Rf (FS), Z (elevation) |
+| `KD2 PNo Code setups Db Df Z` | Closing record — total distances, final elevation |
+| `TO  End-Line` | File footer |
+
+### BF Output Sequence (per setup)
+
+```
+KD1  ...  Z  <BM_elevation>          ← first setup only (opening BM)
+KD1  ...  Rb <BS_staff>  HD <BS_dist>
+KD1  ...  Rf <FS_staff>  HD <FS_dist>
+KD1  ...  Z  <computed_RL>
+```
+
+### BFFB Output Sequence (per setup)
+
+```
+KD1  ...  Z  <BM_elevation>          ← first setup only
+KD1  ...  Rb <BS1_staff> HD <BS1_dist>
+KD1  ...  Rf <FS1_staff> HD <FS1_dist>
+KD1  ...  Rf <FS2_staff> HD <FS2_dist>
+KD1  ...  Rb <BS2_staff> HD <BS2_dist>
+KD1  ...  Z  <mean_RL>               ← after BS2, uses mean RL not sinking-check RL
+```
+
+### KD2 Closing Record
+
+```
+KD2  LastPoint  Code  Nsetups  |Db <total_BS_dist>|Df <total_FS_dist>|Z <final_RL>|
+```
+
+### Float Precision
+
+Values formatted as `%14.4f` (4 decimal places). Using 6dp causes visible
+float arithmetic noise in the LSB (e.g., `266.390015` instead of `266.3900`).
+
+---
+
 ## CSV Storage Format
 
 ### Header (9 columns)
@@ -241,6 +295,31 @@ and never restored it from records. Next BS1 after load incremented from
 **Fix:** Restore `current_setup_no` from the last valid record in
 `update_current_from_records()`.
 
+### M5 export: BS2 distance missing from KD2 Db sum
+
+**Problem:** `SIGHT_BS2` case in `m5_export.c` was missing `db += r->distance`.
+KD2 `Db` field (total backsight distance) was under-counted by one BS2 leg.
+
+**Fix:** Added `db += r->distance` at the top of the `SIGHT_BS2` case.
+
+### M5 export: float precision noise at 6 decimal places
+
+**Problem:** `%14.6f` format exposed 32-bit float arithmetic rounding
+(e.g., `266.390015 m` instead of `266.3900 m`).
+
+**Fix:** Changed format to `%14.4f` in all three data blocks in `write_line()`.
+4 decimal places (0.1mm) matches DiNi instrument precision.
+
+### M5 export: opening BM name wrong (`BM001` instead of station name)
+
+**Problem:** `job_add_point()` auto-name generation for `SIGHT_BS` / `SIGHT_BS1`
+always overwrote `r.name` and never checked `override_name`. CSV rows with
+a named BM (e.g., `405`) were imported with the correct name in the CSV but
+silently replaced with the auto-generated `BM001`.
+
+**Fix:** Added `override_name` check after auto-naming block for `SIGHT_BS`,
+`SIGHT_BS1`, and `SIGHT_IS`, matching the existing pattern for `SIGHT_FS`/`SIGHT_FS1`.
+
 ### Nav bar obscuring last record (mobile)
 
 **Problem:** Records table had `max-height:380px` with its own scroll.
@@ -269,15 +348,18 @@ On Android, the fixed bottom nav bar overlapped the last visible row.
 10. **Batch fixes before flashing** — each flash requires physically swapping cable between laptop and SDL30+battery; never flash a partial fix
 11. **Optimistic UI (auto-save on change) better than Save button** — field use favors fewer taps
 12. **Laptop USB provides ~500mA — insufficient for ESP32 WiFi peaks** — use phone charger (2A+) for reliable power
+13. **32-bit float has ~7 significant digits** — formatting RL values at 6dp reveals arithmetic noise in the LSB; always use 4dp for M5 output to match instrument precision
+14. **SPIFFS survives firmware reflash** — job CSV and meta files are untouched by `idf.py flash`; re-import is only needed when the stored data itself needs to change (e.g., after fixing point name logic)
 
 ---
 
 ## Pending / Known Issues
 
-- **TP naming**: leapfrog (TP001/TP002 alternating) implemented but needs
-  rethink. General case requires sequential numbering (TP001, TP002, TP003…)
-  with ability to set a custom name (e.g. ST35) when FS is a named benchmark.
-  Proposed: editable name field in Measure tab pre-populated with next TP.
+- **BFFB M5 export**: BF M5 export verified against real DiNi data (19 setups,
+  `18001_section1.csv`). BFFB M5 export not yet tested — specifically: Z record
+  must appear after BS2 using mean RL, not the sinking-check RL.
+- **Report export**: Reports tab has placeholder buttons (CSV, HTML). No output
+  format defined yet. Decided to defer until after M5 export is fully validated.
 - **setup_no in existing CSV**: records saved before the setup_no fix show
   wrong numbers. `survey_recalc()` does not correct setup_no — only staff
   readings are ground truth.
@@ -286,9 +368,30 @@ On Android, the fixed bottom nav bar overlapped the last visible row.
 
 ---
 
+## Test Tools
+
+### `tools/import_csv.py` — CSV import (test only)
+
+Posts a job CSV to the `/api/import` endpoint. Used to inject reference data
+(e.g., TBC-exported CSV) for M5 export verification.
+
+```
+python3 tools/import_csv.py <csv_file> <job_name> [device_ip]
+```
+
+The `/api/import` POST endpoint (`web_server.c`) is test-only and not
+linked from the web UI. It reads bench RL from CSV column 7, creates the
+job, then adds each row via `job_add_point()`.
+
+---
+
 ## Git History
 
 ```
+f43eb0f Fix: Records page BS-FS display and station PASS/FAIL for BFFB
+3698ef7 Fix: paired name sync (BS1↔BS2, FS1↔FS2) and Report misclosure/points
+215f7e8 Feat: editable FS point name field + sequential TP naming
+78b85e4 Docs: add V2 development log for ESP32-S3-N16
 4b45b11 Fix: RL/HI carry-forward, setup_no restore, nav bar, TP naming
 2ea206b Fix: clear measurement display on new job
 971f11b Fix: dblr_step reset to BS1 on new job
