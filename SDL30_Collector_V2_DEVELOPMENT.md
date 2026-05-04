@@ -353,18 +353,35 @@ On Android, the fixed bottom nav bar overlapped the last visible row.
 
 ---
 
-## Pending / Known Issues
+## V2 Status — COMPLETE
 
-- **BFFB M5 export**: BF M5 export verified against real DiNi data (19 setups,
-  `18001_section1.csv`). BFFB M5 export not yet tested — specifically: Z record
-  must appear after BS2 using mean RL, not the sinking-check RL.
-- **Report export**: Reports tab has placeholder buttons (CSV, HTML). No output
-  format defined yet. Decided to defer until after M5 export is fully validated.
-- **setup_no in existing CSV**: records saved before the setup_no fix show
-  wrong numbers. `survey_recalc()` does not correct setup_no — only staff
-  readings are ground truth.
-- **OTA firmware update**: partition table has OTA slots. Adding a web UI
-  upload endpoint would eliminate cable-swap for field updates.
+All planned V2 features implemented and field-verified.
+
+### Verified
+
+| Feature | Test |
+|---------|------|
+| BF M5 export | 19-setup BF job (`18001_section1.csv`, real DiNi reference data) |
+| BFFB M5 export | 4-setup closed loop; Z after BS2 with mean RL; Db/Df correct; misclosure +0.3mm |
+| BFFB arithmetic | Mean RL verified against real Trimble DiNi field file (`10032026_Rev02.DAT`) |
+| Note → TO record | "Nuts on concrete foundation" emitted correctly as TO after BS1 |
+| KD2 closing record | Setup count, Db, Df, final Z all correct |
+
+### Deferred to V3
+
+- **GPS + timestamp in M5**: Phone GPS (±10m) + measurement time in a `TO` note
+  record after each Z. Genuine advantage over real DiNi (no GNSS). Timestamp
+  in info block; GPS as `lat,lon,HH:MM:SS` in TO record (25 chars, fits in 27).
+- **Report export (CSV/HTML)**: Placeholder buttons in Reports tab. Format TBD.
+- **OTA firmware update**: Web UI upload endpoint to eliminate cable-swap.
+
+### Known non-blocking issues
+
+- **`setup_no` in pre-fix CSVs**: Jobs recorded before the setup_no fix show
+  wrong setup numbers in KD2 count. Staff readings are ground truth; RL is
+  unaffected. New jobs are correct.
+- **`Sh` summary record**: Real DiNi emits a total ΔH + misclosure record
+  before KD2. Our exporter omits it. TBC imports correctly without it.
 
 ---
 
@@ -388,6 +405,7 @@ job, then adds each row via `job_add_point()`.
 ## Git History
 
 ```
+ba37fdf Feat: M5 export tested+fixed, UX cleanup, /api/import test endpoint  ← V2 COMPLETE
 f43eb0f Fix: Records page BS-FS display and station PASS/FAIL for BFFB
 3698ef7 Fix: paired name sync (BS1↔BS2, FS1↔FS2) and Report misclosure/points
 215f7e8 Feat: editable FS point name field + sequential TP naming
