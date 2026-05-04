@@ -161,8 +161,9 @@ esp_err_t job_set_bench(float bench_rl)
 {
     xSemaphoreTake(s_mtx, portMAX_DELAY);
     s_job.bench_rl = bench_rl;
-    survey_recalc(s_records, s_count, bench_rl);
+    float carry = survey_recalc(s_records, s_count, bench_rl);
     update_current_from_records();
+    s_job.current_rl = carry;
     xSemaphoreGive(s_mtx);
 
     storage_rewrite_csv(&s_job, s_records, s_count);
@@ -366,9 +367,10 @@ esp_err_t job_delete_point(uint32_t index)
     }
 
     if (found) {
-        survey_recalc(s_records, s_count, s_job.bench_rl);
+        float carry = survey_recalc(s_records, s_count, s_job.bench_rl);
         s_job.point_count = s_count;
         update_current_from_records();
+        s_job.current_rl = carry;
     }
     xSemaphoreGive(s_mtx);
 
@@ -393,8 +395,9 @@ esp_err_t job_edit_sight(uint32_t index, sight_type_t new_sight)
         }
     }
     if (found) {
-        survey_recalc(s_records, s_count, s_job.bench_rl);
+        float carry = survey_recalc(s_records, s_count, s_job.bench_rl);
         update_current_from_records();
+        s_job.current_rl = carry;
     }
     xSemaphoreGive(s_mtx);
 
