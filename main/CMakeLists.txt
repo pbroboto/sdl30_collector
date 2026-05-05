@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.c"
+        "led.c"
         "settings.c"
         "sdl30/sdl30.c"
         "survey/survey.c"

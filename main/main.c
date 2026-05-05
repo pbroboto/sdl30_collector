@@ -1,9 +1,6 @@
 /**
  * main.c — SDL30 Collector entry point
  *
- * Hardware : ESP32-WROOM-32
- * Framework: ESP-IDF v5.4
- *
  * LA policy:
  *   - Once at startup
  *   - After SDL_LM_TIMEOUT_MAX consecutive LM timeouts
@@ -11,40 +8,28 @@
  */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/gpio.h"
-#include "led_strip.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 
 #include "config.h"
+#include "led.h"
 #include "sdl30/sdl30.h"
 #include "survey/job.h"
 #include "storage/storage.h"
 #include "web/web_server.h"
 
 static const char *TAG = "MAIN";
-static led_strip_handle_t s_strip = NULL;
 
 // ─── SDL30 connection state (shared with web_server) ─────────────────────────
 bool  g_sdl_ok        = false;
 char  g_sdl_model[16] = "---";
 char  g_sdl_serial[16]= "---";
 char  g_sdl_rom[8]    = "---";
-int   g_lm_timeouts   = 0;     // consecutive LM timeout counter
-
-// ─── LED ──────────────────────────────────────────────────────────────────────
-static void led_blink(int n)
-{
-    for (int i = 0; i < n; i++) {
-        gpio_set_level(LED_GPIO, 1); vTaskDelay(pdMS_TO_TICKS(100));
-        gpio_set_level(LED_GPIO, 0); vTaskDelay(pdMS_TO_TICKS(100));
-    }
-}
+int   g_lm_timeouts   = 0;
 
 // ─── SDL30 monitor task ───────────────────────────────────────────────────────
 static void sdl_monitor_task(void *pv)
 {
-    // LA once at startup
     vTaskDelay(pdMS_TO_TICKS(1000));
     ESP_LOGI(TAG, "SDL30 startup check...");
 
@@ -52,15 +37,13 @@ static void sdl_monitor_task(void *pv)
         g_sdl_ok = true;
         ESP_LOGI(TAG, "SDL30 connected: %s SN:%s ROM:%s",
                  g_sdl_model, g_sdl_serial, g_sdl_rom);
-        led_blink(3);
+        led_set(LED_READY);
     } else {
         g_sdl_ok = false;
         ESP_LOGW(TAG, "SDL30 not found on startup");
-        ESP_LOGW(TAG, "  Check: powered on? standby screen? baud=2400?");
-        led_blink(5);
+        led_set(LED_NO_SDL);
     }
 
-    // Monitor LM timeout count — no periodic LA!
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(500));
         if (g_lm_timeouts >= SDL_LM_TIMEOUT_MAX) {
@@ -68,11 +51,11 @@ static void sdl_monitor_task(void *pv)
             if (sdl30_get_info(g_sdl_model, g_sdl_serial, g_sdl_rom) == ESP_OK) {
                 g_sdl_ok = true;
                 ESP_LOGI(TAG, "SDL30 alive: %s SN:%s", g_sdl_model, g_sdl_serial);
-                led_blink(1);
+                led_set(LED_READY);
             } else {
                 g_sdl_ok = false;
                 ESP_LOGW(TAG, "SDL30 disconnected!");
-                led_blink(5);
+                led_set(LED_NO_SDL);
             }
             g_lm_timeouts = 0;
         }
@@ -85,52 +68,21 @@ void app_main(void)
     ESP_LOGI(TAG, "=== SDL30 Collector starting ===");
     ESP_LOGI(TAG, "ESP32-S3-N16  ESP-IDF v5.4");
 
-    // WS2812 onboard LED — turn off (GPIO2)
-    led_strip_config_t strip_cfg = {
-        .strip_gpio_num = 48,
-        .max_leds = 1,
-    };
-    led_strip_rmt_config_t rmt_cfg = {
-        .resolution_hz = 10 * 1000 * 1000,
-        .flags.with_dma = true,
-    };
-    esp_err_t led_err = led_strip_new_rmt_device(&strip_cfg, &rmt_cfg, &s_strip);
-    ESP_LOGI(TAG, "WS2812 init: %d", led_err);
-    if (led_err == ESP_OK) {
-        led_strip_clear(s_strip);
-        led_strip_refresh(s_strip);
-        vTaskDelay(pdMS_TO_TICKS(100));
-        ESP_LOGI(TAG, "WS2812 off");
-    }
-    // LED
-    gpio_config_t led_cfg = {
-        .pin_bit_mask = 1ULL << LED_GPIO,
-        .mode = GPIO_MODE_OUTPUT,
-    };
-    gpio_config(&led_cfg);
+    led_init();   // Red slow blink until SDL30 confirmed
 
-    // NVS
     nvs_flash_init();
 
-    // SPIFFS
     ESP_LOGI(TAG, "Mounting SPIFFS...");
     if (storage_init() != ESP_OK)
         ESP_LOGW(TAG, "SPIFFS failed — running without storage");
 
-    // SDL30 UART
     sdl30_init();
-
-    // Job module
     job_init();
-
-    // WiFi + HTTP server
     web_server_start();
 
-    led_blink(3);
     ESP_LOGI(TAG, "=== Ready! ===");
     ESP_LOGI(TAG, "WiFi: %s  pass: %s", WIFI_AP_SSID, WIFI_AP_PASS);
     ESP_LOGI(TAG, "Open: http://%s", WIFI_AP_IP);
 
-    // SDL30 monitor task
     xTaskCreate(sdl_monitor_task, "sdl_mon", 4096, NULL, TASK_PRIO_SDL, NULL);
 }

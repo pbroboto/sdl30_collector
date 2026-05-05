@@ -32,6 +32,7 @@ static const char *TAG = "WEB";
 static httpd_handle_t s_httpd = NULL;
 
 // ─── Externals from main.c ────────────────────────────────────────────────────
+#include "../led.h"
 extern bool g_sdl_ok;
 extern char g_sdl_model[16];
 extern char g_sdl_serial[16];
@@ -283,16 +284,19 @@ static esp_err_t h_jobs(httpd_req_t *req)
 static esp_err_t h_measure(httpd_req_t *req)
 {
     float staff = 0.0f, distance = 0.0f;
+    led_set(LED_MEASURING);
     esp_err_t err = sdl30_measure(&staff, &distance);
 
     if (err != ESP_OK) {
         g_lm_timeouts++;
+        led_set(g_sdl_ok ? LED_READY : LED_NO_SDL);
         ESP_LOGW(TAG, "LM failed (%d/%d)", g_lm_timeouts, SDL_LM_TIMEOUT_MAX);
         send_err(req, "SDL30 measurement failed");
         return ESP_OK;
     }
     g_lm_timeouts = 0;
     g_sdl_ok = true;
+    led_set(LED_READY);
 
     int method = s_settings.obs_method;
 
