@@ -1069,6 +1069,7 @@ static const char WEB_UI_HTML[] =
 "      compElev:compElevVal,"
 "      misclose:d.misclose,points:d.points,readings:d.readings||d.points,"
 "      sumBSDist:d.sum_bs_dist||0,sumFSDist:d.sum_fs_dist||0};"
+"    await loadRecords();"
 "  }catch(e){showToast('Error: '+e);}"
 "}"
 
