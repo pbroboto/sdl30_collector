@@ -387,7 +387,7 @@ On Android, the fixed bottom nav bar overlapped the last visible row.
 11. **Optimistic UI (auto-save on change) better than Save button** — field use favors fewer taps
 12. **Laptop USB provides ~500mA — insufficient for ESP32 WiFi peaks** — use phone charger (2A+) for reliable power
 13. **32-bit float has ~7 significant digits** — formatting RL values at 6dp reveals arithmetic noise in the LSB; always use 4dp for M5 output to match instrument precision
-14. **SPIFFS survives firmware reflash** — job CSV and meta files are untouched by `idf.py flash`; re-import is only needed when the stored data itself needs to change (e.g., after fixing point name logic)
+14. **SPIFFS survives firmware reflash** — job CSV and meta files are untouched by `idf.py flash`; the SPIFFS partition is not listed in flash_args so it is never overwritten. `idf.py flash` is safe for day-to-day development.
 15. **`format_if_mount_failed = true` is a silent data destroyer** — any SPIFFS mount hiccup erases years of field data with no warning; always set `false` and handle the error explicitly
 16. **JSON rounding creates arithmetic inconsistency** — when server rounds `sum_bs` and `sum_fs` independently, JS subtraction gives a different result than the server-computed `comp_elev − opening_bm`; always derive displayed deltas from the authoritative computed value
 17. **`cachedRecords` must be populated before export** — if the export function relies on a cache that's only filled on tab switch, the user can export an empty report without any error; make the export trigger its own fetch
@@ -409,6 +409,7 @@ All planned V2 features implemented and field-verified.
 | KD2 closing record | Setup count, Db, Df, final Z all correct |
 | CSV report export | RW2E job — arithmetic check, distance balance, all 16 observation records |
 | HTML report export | RW2E job — professional layout, per-setup colour coding, misclosure +0.2mm |
+| Traffic-light LEDs | Red blink = no SDL30, Green solid = ready, Yellow blink = measuring |
 
 ### Deferred to V3
 
@@ -416,6 +417,7 @@ All planned V2 features implemented and field-verified.
   record after each Z. Genuine advantage over real DiNi (no GNSS). Timestamp
   in info block; GPS as `lat,lon,HH:MM:SS` in TO record (25 chars, fits in 27).
 - **OTA firmware update**: Web UI upload endpoint to eliminate cable-swap.
+- **Battery pack**: Hardware-only concern — use 2A+ charger; PL4506+MT3608 combo board's built-in power button is the on/off switch. No firmware changes needed.
 
 ### Known non-blocking issues
 
@@ -447,6 +449,8 @@ job, then adds each row via `job_add_point()`.
 ## Git History
 
 ```
+83bd9ec Feat: traffic-light status LEDs (Red=GPIO4, Yellow=GPIO5, Green=GPIO6)
+fd37057 Docs: update V2 log — report export verified, 4 new bug fixes documented
 d3ed13c Fix: HTML/CSV export empty records + SPIFFS silent wipe prevention
 18e8cd8 Fix: HTML report row colours by sight transition, not setup_no
 69d6fbe Fix: ΔElev derived from comp_elev−opening_bm to match Misclosure
