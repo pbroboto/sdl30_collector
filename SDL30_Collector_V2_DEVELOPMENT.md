@@ -139,7 +139,7 @@ main/
 - Measure (live reading + method-specific UI)
 - Records (scrollable table with name/note edit; CSV + M5/Zeiss download)
 - Jobs (switch/create/delete/download CSV)
-- Report (closed-loop misclosure; future CSV/HTML report export)
+- Report (closed-loop misclosure; CSV and HTML report export)
 - Settings (method, limits, baud)
 
 **Safety Checks:**
@@ -320,6 +320,44 @@ silently replaced with the auto-generated `BM001`.
 **Fix:** Added `override_name` check after auto-naming block for `SIGHT_BS`,
 `SIGHT_BS1`, and `SIGHT_IS`, matching the existing pattern for `SIGHT_FS`/`SIGHT_FS1`.
 
+### ΔElev inconsistent with Comp. Elev in report
+
+**Problem:** The server rounds `sum_bs` and `sum_fs` independently to 4 decimal
+places in the JSON response. Subtracting the two rounded values in JS gave a
+different result (e.g. 0.0003m) than `comp_elev − opening_bm` (0.0002m), which
+is computed at full float precision before rounding.
+
+**Fix:** `ΔElev` is now derived as `comp_elev − opening_bm` rather than
+`sum_bs − sum_fs`. All three numbers (ΣBS − ΣFS = ΔElev, Opening BM + ΔElev
+= Comp. Elev, Misclosure = Comp. Elev − Closing BM) are now consistent.
+
+### HTML report row colours not distinct per instrument position
+
+**Problem:** The HTML export coloured rows using `(setup_no − 1) % 10`. Any
+records sharing the same `setup_no` got the same background — masking distinct
+instrument positions when `setup_no` wasn't incrementing correctly.
+
+**Fix:** Same sight-transition counter already used by the on-screen Records tab:
+increment colour index on each `BS` / `BS1` observation, so every instrument
+position gets a distinct colour regardless of stored `setup_no`.
+
+### HTML/CSV export observation records empty
+
+**Problem:** `cachedRecords` is populated only when the Records tab is opened.
+If the user went directly to the Report tab, `calcMisclose()` set `cachedReport`
+but `cachedRecords` stayed `[]`. The exported HTML/CSV had no observation rows.
+
+**Fix:** `calcMisclose()` now `await loadRecords()` after setting `cachedReport`,
+ensuring records are always cached before the user can export.
+
+### SPIFFS silent data wipe on mount failure
+
+**Problem:** `format_if_mount_failed = true` meant any SPIFFS mount error
+(e.g. power-interrupted write, library change) silently erased all job data.
+
+**Fix:** Changed to `false`. On mount failure the firmware logs a warning and
+runs without storage instead of wiping the SPIFFS partition.
+
 ### Nav bar obscuring last record (mobile)
 
 **Problem:** Records table had `max-height:380px` with its own scroll.
@@ -350,6 +388,9 @@ On Android, the fixed bottom nav bar overlapped the last visible row.
 12. **Laptop USB provides ~500mA — insufficient for ESP32 WiFi peaks** — use phone charger (2A+) for reliable power
 13. **32-bit float has ~7 significant digits** — formatting RL values at 6dp reveals arithmetic noise in the LSB; always use 4dp for M5 output to match instrument precision
 14. **SPIFFS survives firmware reflash** — job CSV and meta files are untouched by `idf.py flash`; re-import is only needed when the stored data itself needs to change (e.g., after fixing point name logic)
+15. **`format_if_mount_failed = true` is a silent data destroyer** — any SPIFFS mount hiccup erases years of field data with no warning; always set `false` and handle the error explicitly
+16. **JSON rounding creates arithmetic inconsistency** — when server rounds `sum_bs` and `sum_fs` independently, JS subtraction gives a different result than the server-computed `comp_elev − opening_bm`; always derive displayed deltas from the authoritative computed value
+17. **`cachedRecords` must be populated before export** — if the export function relies on a cache that's only filled on tab switch, the user can export an empty report without any error; make the export trigger its own fetch
 
 ---
 
@@ -366,13 +407,14 @@ All planned V2 features implemented and field-verified.
 | BFFB arithmetic | Mean RL verified against real Trimble DiNi field file (`10032026_Rev02.DAT`) |
 | Note → TO record | "Nuts on concrete foundation" emitted correctly as TO after BS1 |
 | KD2 closing record | Setup count, Db, Df, final Z all correct |
+| CSV report export | RW2E job — arithmetic check, distance balance, all 16 observation records |
+| HTML report export | RW2E job — professional layout, per-setup colour coding, misclosure +0.2mm |
 
 ### Deferred to V3
 
 - **GPS + timestamp in M5**: Phone GPS (±10m) + measurement time in a `TO` note
   record after each Z. Genuine advantage over real DiNi (no GNSS). Timestamp
   in info block; GPS as `lat,lon,HH:MM:SS` in TO record (25 chars, fits in 27).
-- **Report export (CSV/HTML)**: Placeholder buttons in Reports tab. Format TBD.
 - **OTA firmware update**: Web UI upload endpoint to eliminate cable-swap.
 
 ### Known non-blocking issues
@@ -405,7 +447,12 @@ job, then adds each row via `job_add_point()`.
 ## Git History
 
 ```
-ba37fdf Feat: M5 export tested+fixed, UX cleanup, /api/import test endpoint  ← V2 COMPLETE
+d3ed13c Fix: HTML/CSV export empty records + SPIFFS silent wipe prevention
+18e8cd8 Fix: HTML report row colours by sight transition, not setup_no
+69d6fbe Fix: ΔElev derived from comp_elev−opening_bm to match Misclosure
+6899fbd Fix: carry-RL bug in delete/edit/bench ops + Report CSV/HTML export
+2224a69 Docs: mark V2 complete — BFFB M5 export verified
+ba37fdf Feat: M5 export tested+fixed, UX cleanup, /api/import test endpoint
 f43eb0f Fix: Records page BS-FS display and station PASS/FAIL for BFFB
 3698ef7 Fix: paired name sync (BS1↔BS2, FS1↔FS2) and Report misclosure/points
 215f7e8 Feat: editable FS point name field + sequential TP naming
