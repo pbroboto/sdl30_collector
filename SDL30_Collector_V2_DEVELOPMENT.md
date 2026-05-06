@@ -37,6 +37,43 @@ Same BOM, MCU upgraded to ESP32-S3-N16R8:
 - USB-OTG support (direct PC connection possible)
 - Same GPIO 16/17 UART pins — no wiring changes needed
 
+### Front Panel Design (V2 enclosure)
+
+```
+┌─────────────────────────────────┐
+│                                 │
+│  [R] [Y] [G]   [USB-C]  [SW]   │
+│   4   5   6    charge   power   │
+│                                 │
+└─────────────────────────────────┘
+```
+
+| Component | Part | Function |
+|-----------|------|----------|
+| Red LED (GPIO4) | 5mm through-hole | Booting / SDL30 not connected |
+| Yellow LED (GPIO5) | 5mm through-hole | Measuring in progress |
+| Green LED (GPIO6) | 5mm through-hole | SDL30 ready |
+| USB-C socket | Panel-mount | Wired to TP4056 module (charge input) |
+| TP4056 module | Inside box | Single-cell Li-ion charger, up to 1A |
+| Rocker/slide switch | Panel-mount | Disconnects 18650 from boost converter |
+| MT3608 boost | Inside box | 3.7V → 5V for ESP32 |
+
+**Power flow:**
+
+```
+USB-C ──► TP4056 ──► 18650 ──► [Switch] ──► MT3608 boost ──► ESP32 5V
+           charger              ON/OFF        3.7→5V
+```
+
+| Switch | USB | Result |
+|--------|-----|--------|
+| OFF | plugged | TP4056 charges 18650, ESP32 off |
+| ON | unplugged | 18650 → ESP32 (field use) |
+| ON | plugged | charges and runs simultaneously |
+
+Optional: 4th indicator LED wired to TP4056 `CHRG` pin (open-drain, low = charging)
+so surveyor can read charge status while ESP32 is off. No firmware required — pure hardware.
+
 ### Wiring (both versions)
 
 ```
@@ -417,7 +454,7 @@ All planned V2 features implemented and field-verified.
   record after each Z. Genuine advantage over real DiNi (no GNSS). Timestamp
   in info block; GPS as `lat,lon,HH:MM:SS` in TO record (25 chars, fits in 27).
 - **OTA firmware update**: Web UI upload endpoint to eliminate cable-swap.
-- **Battery pack**: Hardware-only concern — use 2A+ charger; PL4506+MT3608 combo board's built-in power button is the on/off switch. No firmware changes needed.
+- **Battery pack**: Hardware-only — TP4056 charger + MT3608 boost + panel-mount USB-C + rocker switch. Front panel: 3 traffic-light LEDs + USB-C + power switch. Optional TP4056 CHRG indicator LED for charge status while ESP32 is off. No firmware changes needed.
 
 ### Known non-blocking issues
 
