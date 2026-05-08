@@ -1,0 +1,7 @@
+# partitions_wroom32.csv — SDL30 Collector (4MB flash ESP32-WROOM-32, temporary)
+# Name,     Type,  SubType,  Offset,    Size
+nvs,        data,  nvs,      0x9000,    0x5000
+app0,       app,   factory,  0x10000,   0x180000
+spiffs,     data,  spiffs,   0x190000,  0x270000
+# App:    1.5MB  (no OTA — temporary build)
+# SPIFFS: 2.4MB  (~2400 measurement points, ~48 jobs)

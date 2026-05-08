@@ -39,9 +39,11 @@
 #define DEF_BLOCK_ON        false
 
 // ─── Hardware ─────────────────────────────────────────────────────────────────
-#define LED_RED_GPIO        GPIO_NUM_4
-#define LED_YEL_GPIO        GPIO_NUM_5
-#define LED_GRN_GPIO        GPIO_NUM_6
+// Temporary: running on ESP32-WROOM-32 while S3 GPIO issue is investigated
+#define LED_VCC_GPIO        GPIO_NUM_21  // permanent HIGH — feeds all LED anodes
+#define LED_RED_GPIO        GPIO_NUM_22  // confirmed working on WROOM-32
+#define LED_YEL_GPIO        GPIO_NUM_19
+#define LED_GRN_GPIO        GPIO_NUM_18
 
 // ─── FreeRTOS task priorities ─────────────────────────────────────────────────
 #define TASK_PRIO_SDL       5

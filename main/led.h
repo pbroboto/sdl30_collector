@@ -1,5 +1,5 @@
 /**
- * led.h — Traffic-light status LEDs (Red=GPIO4, Yellow=GPIO5, Green=GPIO6)
+ * led.h — Traffic-light status LEDs, active-LOW (VCC=GPIO15, Red=GPIO9, Yellow=GPIO10, Green=GPIO11)
  *
  * States:
  *   LED_BOOTING   — Red slow blink: system starting up

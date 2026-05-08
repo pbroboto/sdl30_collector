@@ -30,9 +30,9 @@ static void led_task(void *pv)
                 break;
         }
 
-        gpio_set_level(LED_RED_GPIO, r);
-        gpio_set_level(LED_YEL_GPIO, y);
-        gpio_set_level(LED_GRN_GPIO, g);
+        gpio_set_level(LED_RED_GPIO, !r);  // active-LOW
+        gpio_set_level(LED_YEL_GPIO, !y);
+        gpio_set_level(LED_GRN_GPIO, !g);
         tick++;
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -41,7 +41,8 @@ static void led_task(void *pv)
 void led_init(void)
 {
     gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << LED_RED_GPIO) |
+        .pin_bit_mask = (1ULL << LED_VCC_GPIO) |
+                        (1ULL << LED_RED_GPIO) |
                         (1ULL << LED_YEL_GPIO) |
                         (1ULL << LED_GRN_GPIO),
         .mode         = GPIO_MODE_OUTPUT,
@@ -50,9 +51,10 @@ void led_init(void)
         .intr_type    = GPIO_INTR_DISABLE,
     };
     gpio_config(&cfg);
-    gpio_set_level(LED_RED_GPIO, 0);
-    gpio_set_level(LED_YEL_GPIO, 0);
-    gpio_set_level(LED_GRN_GPIO, 0);
+    gpio_set_level(LED_VCC_GPIO, 1);
+    gpio_set_level(LED_RED_GPIO, 0);  // red on at boot
+    gpio_set_level(LED_YEL_GPIO, 1);  // yellow off
+    gpio_set_level(LED_GRN_GPIO, 1);  // green off
 
-    xTaskCreate(led_task, "led", 1024, NULL, 1, NULL);
+    xTaskCreate(led_task, "led", 2048, NULL, 1, NULL);
 }
