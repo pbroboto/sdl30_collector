@@ -37,6 +37,87 @@ Same BOM, MCU upgraded to ESP32-S3-N16R8:
 - USB-OTG support (direct PC connection possible)
 - Same GPIO 16/17 UART pins — no wiring changes needed
 
+### WROOM-32 Temporary Deployment (post-V2)
+
+GPIO9/10/11/15 on the S3 would not sink or source current despite being
+valid output GPIOs per `soc_caps.h`. Root cause unknown. Moved to
+ESP32-WROOM-32 temporarily.
+
+**LED wiring changes (WROOM-32):**
+
+| Signal | S3 GPIO | WROOM-32 GPIO | Notes |
+|--------|---------|---------------|-------|
+| VCC (anode rail) | GPIO21 | GPIO21 | Permanent HIGH — both 3V3 pins occupied by SP3232EEN |
+| Red LED | GPIO9 | GPIO22 | Active-LOW: blue→GPIO21, black→signal GPIO |
+| Yellow LED | GPIO10 | GPIO19 | |
+| Green LED | GPIO11 | GPIO18 | |
+
+**Partition table changed** from 16MB S3 layout to 4MB WROOM-32 (`partitions_wroom32.csv`):
+
+```
+nvs,    data, nvs,    0x9000,   0x5000
+app0,   app,  factory,0x10000,  0x180000   ← 1.5MB app, no OTA
+spiffs, data, spiffs, 0x190000, 0x270000   ← 2.4MB SPIFFS
+```
+
+**After `idf.py erase-flash`:** SPIFFS partition is blank (all 0xFF).
+`format_if_mount_failed = true` allows firmware to auto-format on first
+boot. Safe for WROOM-32 factory partition — only `idf.py flash` can
+blank the SPIFFS (it always writes the full partition table + app),
+and erase-flash is always intentional.
+
+**Job data migration (S3 → WROOM-32):**
+
+```bash
+# 1. Dump S3 SPIFFS (offset from partitions.csv)
+esptool.py --chip esp32s3 -p /dev/ttyACM0 read_flash 0x610000 0x9F0000 s3_spiffs.bin
+
+# 2. Extract files
+mkspiffs -u ./extracted -b 4096 -p 256 -s 0x9F0000 s3_spiffs.bin
+
+# 3. Repack for WROOM-32 partition size
+mkspiffs -c ./extracted -b 4096 -p 256 -s 0x270000 wroom32_spiffs.bin
+
+# 4. Flash SPIFFS partition only (no firmware overwrite)
+esptool.py --chip esp32 -p /dev/ttyUSB0 write_flash 0x190000 wroom32_spiffs.bin
+```
+
+All 7 jobs (RW2E–RW2K, 18001_s1) migrated successfully. No data lost.
+
+### Battery Pack (implemented post-V2)
+
+| Component | Part |
+|-----------|------|
+| Battery board | TP4056 + MT3508 two-in-one module |
+| Cell | 18650 3200mAh 3.7V |
+| Fan | 5V DC 25×25mm (always on) |
+| Switch | Panel-mount rocker — cuts red wire (5V Vout+) |
+
+**Power flow:**
+
+```
+USB-C ──► TP4056 ──► 18650 ──► MT3508 boost ──► [Switch] ──► ESP32 5V + Fan
+           charger              3.7→5V            ON/OFF
+```
+
+Connect Vout+/Vout- directly to expansion board 5V/GND pins — avoids
+USB-C power negotiation issue (required replug when USB-A→USB-C used).
+
+**Estimated battery life (3200mAh, single cell):**
+
+| Load | Draw from battery | Runtime |
+|------|-------------------|---------|
+| ESP32 + LEDs + Fan | ~490mA | ~5.5h realistic |
+| ESP32 + LEDs (no fan) | ~400mA | ~8.5h realistic |
+| Two cells in parallel | ~490mA | ~11h realistic |
+
+Two 18650 in **parallel** (same brand, same age): doubles capacity,
+voltage stays 3.7V, TP4056 charges both correctly.
+
+**Known issue resolved:** Intermittent power cutoff traced to loose
+solder joints on thin battery wires — not MT3508 auto-shutoff. Fixed
+by replacing with larger gauge wire and re-soldering.
+
 ### Front Panel Design (V2 enclosure)
 
 ```
@@ -387,13 +468,16 @@ but `cachedRecords` stayed `[]`. The exported HTML/CSV had no observation rows.
 **Fix:** `calcMisclose()` now `await loadRecords()` after setting `cachedReport`,
 ensuring records are always cached before the user can export.
 
-### SPIFFS silent data wipe on mount failure
+### SPIFFS mount failure after erase-flash
 
-**Problem:** `format_if_mount_failed = true` meant any SPIFFS mount error
-(e.g. power-interrupted write, library change) silently erased all job data.
+**Problem:** After `idf.py erase-flash`, the SPIFFS partition is blank (all
+0xFF). With `format_if_mount_failed = false`, firmware logs an error and runs
+without storage — jobs cannot be saved.
 
-**Fix:** Changed to `false`. On mount failure the firmware logs a warning and
-runs without storage instead of wiping the SPIFFS partition.
+**Fix:** Changed to `true`. SPIFFS auto-formats the blank partition on first
+boot after erase-flash. Safe because `idf.py flash` never touches the SPIFFS
+partition on a factory (no-OTA) layout, so the only time SPIFFS is blank is
+after an intentional `erase-flash`.
 
 ### Nav bar obscuring last record (mobile)
 
@@ -428,6 +512,10 @@ On Android, the fixed bottom nav bar overlapped the last visible row.
 15. **`format_if_mount_failed = true` is a silent data destroyer** — any SPIFFS mount hiccup erases years of field data with no warning; always set `false` and handle the error explicitly
 16. **JSON rounding creates arithmetic inconsistency** — when server rounds `sum_bs` and `sum_fs` independently, JS subtraction gives a different result than the server-computed `comp_elev − opening_bm`; always derive displayed deltas from the authoritative computed value
 17. **`cachedRecords` must be populated before export** — if the export function relies on a cache that's only filled on tab switch, the user can export an empty report without any error; make the export trigger its own fetch
+18. **`format_if_mount_failed` depends on partition layout** — `false` is correct for OTA layouts (firmware update never touches SPIFFS); `true` is correct for factory-only layouts where erase-flash is the only way SPIFFS becomes blank
+19. **DiNi `#####` is in the code field, not the name field** — the 5-char code field (info27 bytes 8–12) holds the rejection marker; the 8-char name field is always clean
+20. **USB-C power negotiation fails with boost converters** — connect boost converter Vout+ directly to the 5V pin on the expansion board; avoid USB-A→USB-C which requires replug to negotiate
+21. **Thin battery wires cause intermittent cutoff under load** — voltage drop across a loose or thin wire triggers the battery protection circuit; use ≥22 AWG for all battery connections
 
 ---
 
@@ -481,11 +569,37 @@ The `/api/import` POST endpoint (`web_server.c`) is test-only and not
 linked from the web UI. It reads bench RL from CSV column 7, creates the
 job, then adds each row via `job_add_point()`.
 
+### `tools/m5_to_csv.py` — M5 to CSV converter
+
+Converts a Trimble DiNi M5 file to SDL30 Collector CSV format.
+Handles BFFB state machine, `#####` voided readings (DiNi rejection
+marker in the 5-char code field), and `Station repeated` / `Measurement
+repeated` resets across multiple sections (End-Line / Cont-Line).
+
+```bash
+python3 tools/m5_to_csv.py input.dat [output.csv]
+```
+
+Verified against `m5_examples/06-05-69.dat` — real airport levelling
+run (60 setups, BM 18R-1 → closing BM 36R-2). All 60 TP reduced levels
+match DiNi Z records within 0.00005m (floating-point rounding only).
+Converted CSV also confirmed against Trimble Business Center output.
+
+**M5 `#####` voided readings:** DiNi writes `#####` in the 5-char code
+field (info27 bytes 8–12) when a reading fails the instrument's tolerance
+check. The converter skips all voided KD1 records. `Station repeated` and
+`Measurement repeated` TO records reset the state machine so the valid
+re-measurement that follows is used.
+
 ---
 
 ## Git History
 
 ```
+f3fb325 Feat: M5-to-CSV converter tool and airport survey example
+c827d90 Fix: format SPIFFS on first boot after erase-flash
+8fbef7d Feat: LEDs working on ESP32-WROOM-32 (temporary while S3 GPIO investigated)
+23dd128 Docs: front panel design — LEDs, USB-C charge, power switch layout
 83bd9ec Feat: traffic-light status LEDs (Red=GPIO4, Yellow=GPIO5, Green=GPIO6)
 fd37057 Docs: update V2 log — report export verified, 4 new bug fixes documented
 d3ed13c Fix: HTML/CSV export empty records + SPIFFS silent wipe prevention
