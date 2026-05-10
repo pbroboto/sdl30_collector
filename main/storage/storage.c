@@ -21,7 +21,7 @@ esp_err_t storage_init(void)
         .base_path              = SPIFFS_BASE,
         .partition_label        = NULL,
         .max_files              = SPIFFS_MAX_FILES,
-        .format_if_mount_failed = false,
+        .format_if_mount_failed = true,
     };
     esp_err_t err = esp_vfs_spiffs_register(&conf);
     if (err != ESP_OK) {
