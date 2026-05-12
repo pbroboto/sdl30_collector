@@ -79,11 +79,18 @@ static void update_current_from_records(void)
     s_job.current_setup_no = 0;
     for (int i = (int)s_count - 1; i >= 0; i--) {
         if (s_records[i].valid && !s_records[i].voided) {
-            s_job.current_hi       = s_records[i].hi;
-            s_job.current_rl       = s_records[i].rl;
-            s_job.current_setup_no = s_records[i].setup_no;
+            s_job.current_hi = s_records[i].hi;
+            s_job.current_rl = s_records[i].rl;
             break;
         }
+    }
+    // current_setup_no must be max across ALL records — not just the last one.
+    // After a mid-array insertion the inserted setup gets a high setup_no but
+    // sits before lower-numbered setups, so the last record's setup_no is not
+    // the max and the next job_add_point(BS1) would collide.
+    for (uint32_t i = 0; i < s_count; i++) {
+        if (s_records[i].valid && s_records[i].setup_no > s_job.current_setup_no)
+            s_job.current_setup_no = s_records[i].setup_no;
     }
 }
 
@@ -405,6 +412,100 @@ esp_err_t job_edit_sight(uint32_t index, sight_type_t new_sight)
 
     storage_rewrite_csv(&s_job, s_records, s_count);
     ESP_LOGI(TAG, "Point #%lu sight changed to %s", (unsigned long)index, sight_str(new_sight));
+    return ESP_OK;
+}
+
+// ─── Delete setup ─────────────────────────────────────────────────────────────
+esp_err_t job_delete_setup(uint32_t setup_no)
+{
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    uint32_t write_pos = 0, removed = 0;
+    for (uint32_t i = 0; i < s_count; i++) {
+        if (s_records[i].setup_no == setup_no) {
+            removed++;
+        } else {
+            s_records[write_pos++] = s_records[i];
+        }
+    }
+    s_count = write_pos;
+    for (uint32_t i = 0; i < s_count; i++)
+        s_records[i].index = i + 1;
+    float carry = survey_recalc(s_records, s_count, s_job.bench_rl);
+    s_job.point_count = s_count;
+    update_current_from_records();
+    s_job.current_rl = carry;
+    xSemaphoreGive(s_mtx);
+
+    storage_rewrite_csv(&s_job, s_records, s_count);
+    storage_save_meta(&s_job);
+    ESP_LOGI(TAG, "Deleted setup_no=%lu: %lu records removed, %lu remain",
+             (unsigned long)setup_no, (unsigned long)removed, (unsigned long)s_count);
+    return ESP_OK;
+}
+
+// ─── Insert point ─────────────────────────────────────────────────────────────
+esp_err_t job_insert_point(uint32_t after_index, sight_type_t sight, float staff,
+                           float distance, const char *name, uint32_t setup_no,
+                           float *hi_out, float *rl_out)
+{
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    if (s_count >= MAX_POINTS) {
+        xSemaphoreGive(s_mtx);
+        ESP_LOGE(TAG, "Record buffer full");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Find insert position: one slot after the record with index == after_index
+    uint32_t pos = 0;
+    for (uint32_t i = 0; i < s_count; i++) {
+        if (s_records[i].index == after_index) {
+            pos = i + 1;
+            break;
+        }
+    }
+
+    // Shift records right
+    for (uint32_t i = s_count; i > pos; i--)
+        s_records[i] = s_records[i - 1];
+    s_count++;
+
+    record_t r = {
+        .index    = 0,
+        .setup_no = setup_no,
+        .sight    = sight,
+        .staff    = staff,
+        .distance = distance,
+        .hi       = 0.0f,
+        .rl       = 0.0f,
+        .voided   = false,
+        .valid    = true,
+    };
+    r.name[0] = '\0';
+    if (name && name[0]) {
+        strncpy(r.name, name, MAX_POINT_NAME - 1);
+        r.name[MAX_POINT_NAME - 1] = '\0';
+    }
+    s_records[pos] = r;
+
+    // Renumber all records
+    for (uint32_t i = 0; i < s_count; i++)
+        s_records[i].index = i + 1;
+
+    float carry = survey_recalc(s_records, s_count, s_job.bench_rl);
+    s_job.point_count = s_count;
+    update_current_from_records();
+    s_job.current_rl = carry;
+
+    if (hi_out) *hi_out = s_records[pos].hi;
+    if (rl_out) *rl_out = s_records[pos].rl;
+
+    xSemaphoreGive(s_mtx);
+
+    storage_rewrite_csv(&s_job, s_records, s_count);
+    storage_save_meta(&s_job);
+    ESP_LOGI(TAG, "Inserted [%s] after_idx=%lu pos=%lu name=%s",
+             sight_str(sight), (unsigned long)after_index,
+             (unsigned long)(pos + 1), name ? name : "");
     return ESP_OK;
 }
 

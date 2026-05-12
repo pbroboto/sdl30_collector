@@ -64,6 +64,13 @@ typedef struct {
 
 static dblr_state_t s_dblr = {0};
 
+static bool     s_insert_mode      = false;
+static uint32_t s_insert_after     = 0;
+static uint32_t s_insert_after_base = 0;
+static uint32_t s_insert_setup_no  = 0;
+static char     s_insert_prev_name[MAX_POINT_NAME] = {0};
+static char     s_insert_fs1_name[MAX_POINT_NAME]  = {0};
+
 // Sight sequence for each method and step (0-3)
 // BFFB=1: BS FS FS BS
 // BFBF=2: BS FS BS FS
@@ -179,7 +186,7 @@ static esp_err_t h_status(httpd_req_t *req)
     size_t tot = 0, used = 0;
     storage_info(&tot, &used);
 
-    char buf[512];
+    char buf[640];
     int mi = s_settings.obs_method - 1;
     if (mi < 0 || mi > 2) mi = 0;
     const char *next_lbl = (s_settings.obs_method > 0 && s_dblr.step > 0 && s_dblr.step < 5)
@@ -191,7 +198,8 @@ static esp_err_t h_status(httpd_req_t *req)
         "\"readings\":%lu,\"points\":%lu,\"bench_rl\":%.4f,"
         "\"next_sight\":\"%s\",\"obs_method\":%d,"
         "\"dblr_step\":%d,\"dblr_passed\":%s,\"dblr_diff_mm\":%.3f,"
-        "\"flash_total\":%lu,\"flash_used\":%lu}",
+        "\"flash_total\":%lu,\"flash_used\":%lu,"
+        "\"insert_mode\":%s,\"insert_prev_name\":\"%s\"}",
         g_sdl_ok ? "true" : "false",
         g_sdl_model, g_sdl_serial,
         job->name, job->current_hi, job->current_rl,
@@ -200,7 +208,9 @@ static esp_err_t h_status(httpd_req_t *req)
         (int)s_dblr.step,
         s_dblr.passed ? "true" : "false",
         s_dblr.diff_mm,
-        (unsigned long)tot, (unsigned long)used);
+        (unsigned long)tot, (unsigned long)used,
+        s_insert_mode ? "true" : "false",
+        s_insert_prev_name);
     send_json(req, buf);
     return ESP_OK;
 }
@@ -311,11 +321,35 @@ static esp_err_t h_measure(httpd_req_t *req)
         char sight_s[4] = "BS";
         json_str(body, "sight", sight_s, sizeof(sight_s));
         sight_type_t sight = sight_from_str(sight_s);
-        const char *name_arg = (sight == SIGHT_FS || sight == SIGHT_IS) ? pt_name : NULL;
-        job_add_point(sight, staff, distance, name_arg);
-        const job_t *job = job_get_info();
-        uint32_t cnt = job_get_count();
-        const char *rec_name = (cnt > 0) ? job_get_records()[cnt-1].name : "";
+
+        char used_name[MAX_POINT_NAME] = {0};
+        uint32_t new_index = 0;
+        float ins_hi = 0.0f, ins_rl = 0.0f;
+
+        if (s_insert_mode) {
+            if (sight == SIGHT_BS || sight == SIGHT_IS) {
+                strncpy(used_name,
+                        s_insert_prev_name[0] ? s_insert_prev_name : "BM001",
+                        MAX_POINT_NAME - 1);
+            } else {
+                strncpy(used_name, pt_name[0] ? pt_name : "", MAX_POINT_NAME - 1);
+            }
+            job_insert_point(s_insert_after, sight, staff, distance,
+                             used_name, s_insert_setup_no, &ins_hi, &ins_rl);
+            new_index = s_insert_after + 1;
+            s_insert_after++;
+            if (sight == SIGHT_FS) s_insert_mode = false;
+        } else {
+            const char *name_arg = (sight == SIGHT_FS || sight == SIGHT_IS) ? pt_name : NULL;
+            job_add_point(sight, staff, distance, name_arg);
+            const job_t *j2 = job_get_info();
+            uint32_t cnt = job_get_count();
+            strncpy(used_name, (cnt > 0) ? job_get_records()[cnt-1].name : "", MAX_POINT_NAME-1);
+            new_index = cnt;
+            ins_hi = j2->current_hi;
+            ins_rl = j2->current_rl;
+        }
+
         if (sight == SIGHT_BS)      s_next_sight = SIGHT_FS;
         else if (sight == SIGHT_FS) s_next_sight = SIGHT_BS;
         char resp[256];
@@ -324,9 +358,9 @@ static esp_err_t h_measure(httpd_req_t *req)
             "\"index\":%lu,\"sight\":\"%s\",\"name\":\"%s\","
             "\"staff\":%.4f,\"distance\":%.3f,"
             "\"hi\":%.4f,\"rl\":%.4f}",
-            (unsigned long)cnt,
-            sight_str(sight), rec_name, staff, distance,
-            job->current_hi, job->current_rl);
+            (unsigned long)new_index,
+            sight_str(sight), used_name, staff, distance,
+            ins_hi, ins_rl);
         send_json(req, resp);
         return ESP_OK;
     }
@@ -339,25 +373,52 @@ static esp_err_t h_measure(httpd_req_t *req)
     if (s_dblr.step == DBLR_IDLE || s_dblr.step == DBLR_PASS || s_dblr.step == DBLR_FAIL)
         dblr_reset();
 
-    // Store reading and save to job immediately (like BF)
+    float ins_hi = 0.0f, ins_rl = 0.0f;
+
     switch (s_dblr.step) {
         case DBLR_BS1:
             s_dblr.bs1=staff; s_dblr.bs1_dist=distance;
-            job_add_point(SIGHT_BS1, staff, distance, NULL);
+            if (s_insert_mode) {
+                s_insert_after_base = s_insert_after;
+                job_insert_point(s_insert_after, SIGHT_BS1, staff, distance,
+                                 s_insert_prev_name[0] ? s_insert_prev_name : "BM001",
+                                 s_insert_setup_no, &ins_hi, &ins_rl);
+                s_insert_after++;
+            } else {
+                job_add_point(SIGHT_BS1, staff, distance, NULL);
+            }
             s_dblr.step=DBLR_FS1; break;
         case DBLR_FS1:
             s_dblr.fs1=staff; s_dblr.fs1_dist=distance;
-            job_add_point(SIGHT_FS1, staff, distance, pt_name);
+            if (s_insert_mode) {
+                strncpy(s_insert_fs1_name, pt_name, MAX_POINT_NAME-1);
+                job_insert_point(s_insert_after, SIGHT_FS1, staff, distance,
+                                 pt_name, s_insert_setup_no, &ins_hi, &ins_rl);
+                s_insert_after++;
+            } else {
+                job_add_point(SIGHT_FS1, staff, distance, pt_name);
+            }
             s_dblr.step=DBLR_FS2; break;
         case DBLR_FS2:
             s_dblr.fs2=staff; s_dblr.fs2_dist=distance;
-            job_add_point(SIGHT_FS2, staff, distance, NULL);
+            if (s_insert_mode) {
+                job_insert_point(s_insert_after, SIGHT_FS2, staff, distance,
+                                 s_insert_fs1_name, s_insert_setup_no, &ins_hi, &ins_rl);
+                s_insert_after++;
+            } else {
+                job_add_point(SIGHT_FS2, staff, distance, NULL);
+            }
             s_dblr.step=DBLR_BS2; break;
         case DBLR_BS2:
             s_dblr.bs2=staff; s_dblr.bs2_dist=distance;
-            // Save BS2 immediately — surveyor sees all 4 records
-            job_add_point(SIGHT_BS2, staff, distance, NULL);
-            // Now calculate PASS/FAIL
+            if (s_insert_mode) {
+                job_insert_point(s_insert_after, SIGHT_BS2, staff, distance,
+                                 s_insert_prev_name[0] ? s_insert_prev_name : "BM001",
+                                 s_insert_setup_no, &ins_hi, &ins_rl);
+                s_insert_after++;
+            } else {
+                job_add_point(SIGHT_BS2, staff, distance, NULL);
+            }
             s_dblr.dh1 = s_dblr.bs1 - s_dblr.fs1;
             s_dblr.dh2 = s_dblr.bs2 - s_dblr.fs2;
             s_dblr.diff_mm = fabsf(s_dblr.dh1 - s_dblr.dh2) * 1000.0f;
@@ -365,25 +426,51 @@ static esp_err_t h_measure(httpd_req_t *req)
             s_dblr.step    = s_dblr.passed ? DBLR_PASS : DBLR_FAIL;
 
             if (s_dblr.passed) {
-                ESP_LOGI(TAG, "%s PASS: diff=%.3fmm",
-                         obs_method_str(method), s_dblr.diff_mm);
-            } else {
-                // FAIL — delete all 4 records by index
-                uint32_t cnt = job_get_count();
-                uint32_t start = cnt;
-                for (uint32_t di = 0; di < 4 && start >= di+1; di++) {
-                    job_delete_point(start - di);
+                if (s_insert_mode) {
+                    // Stay in insert mode — user taps Done when all replacement setups are taken.
+                    // Advance prev_name to this setup's FS point so next BS auto-names correctly.
+                    strncpy(s_insert_prev_name, s_insert_fs1_name, MAX_POINT_NAME - 1);
+                    s_insert_prev_name[MAX_POINT_NAME - 1] = '\0';
+                    memset(s_insert_fs1_name, 0, sizeof(s_insert_fs1_name));
+                    // Assign a new unique setup_no for the next inserted setup.
+                    job_lock();
+                    uint32_t new_max = 0;
+                    const record_t *rr = job_get_records();
+                    uint32_t rc = job_get_count();
+                    for (uint32_t i = 0; i < rc; i++)
+                        if (rr[i].valid && rr[i].setup_no > new_max) new_max = rr[i].setup_no;
+                    job_unlock();
+                    s_insert_setup_no = new_max + 1;
                 }
-                ESP_LOGW(TAG, "%s FAIL: diff=%.3fmm > %.1fmm — 4 records deleted!",
-                         obs_method_str(method),
-                         s_dblr.diff_mm, s_settings.max_station_mm);
+                ESP_LOGI(TAG, "%s PASS: diff=%.3fmm", obs_method_str(method), s_dblr.diff_mm);
+            } else {
+                if (s_insert_mode) {
+                    // Delete the 4 just-inserted records by known indices (highest first)
+                    for (int di = 3; di >= 0; di--)
+                        job_delete_point(s_insert_after_base + (uint32_t)di + 1);
+                    s_insert_after = s_insert_after_base;
+                    dblr_reset();
+                    s_dblr.step = DBLR_FAIL;
+                } else {
+                    uint32_t cnt = job_get_count();
+                    uint32_t start = cnt;
+                    for (uint32_t di = 0; di < 4 && start >= di+1; di++)
+                        job_delete_point(start - di);
+                }
+                ESP_LOGW(TAG, "%s FAIL: diff=%.3fmm > %.1fmm — records deleted",
+                         obs_method_str(method), s_dblr.diff_mm, s_settings.max_station_mm);
             }
             break;
         default: dblr_reset(); break;
     }
 
+    if (!s_insert_mode) {
+        const job_t *jb = job_get_info();
+        ins_hi = jb->current_hi;
+        ins_rl = jb->current_rl;
+    }
+
     // Build response
-    const job_t *job = job_get_info();
     int cur_step = (int)s_dblr.step;
     int step_num = (cur_step <= 4) ? cur_step : 4;
     const char *lbl = (step_num > 0 && step_num <= 4) ?
@@ -404,7 +491,7 @@ static esp_err_t h_measure(httpd_req_t *req)
         s_dblr.bs1, s_dblr.fs1, s_dblr.fs2, s_dblr.bs2,
         s_dblr.dh1, s_dblr.dh2, s_dblr.diff_mm,
         s_dblr.passed ? "true" : "false",
-        job->current_hi, job->current_rl,
+        ins_hi, ins_rl,
         (unsigned long)job_get_count());
     send_json(req, resp);
     return ESP_OK;
@@ -1019,6 +1106,69 @@ static esp_err_t h_import(httpd_req_t *req)
     return ESP_OK;
 }
 
+// ─── POST /api/remeasure_setup ────────────────────────────────────────────────
+static esp_err_t h_remeasure_setup(httpd_req_t *req)
+{
+    char body[64] = {0};
+    read_body(req, body, sizeof(body));
+    int setup_no_i = 0, after_index_i = 0;
+    if (!json_int(body, "setup_no", &setup_no_i)) {
+        send_err(req, "setup_no required"); return ESP_OK;
+    }
+    json_int(body, "after_index", &after_index_i);
+    uint32_t setup_no    = (uint32_t)setup_no_i;
+    uint32_t after_index = (uint32_t)after_index_i;
+
+    // Capture name of the point at after_index (will become BS name)
+    memset(s_insert_prev_name, 0, sizeof(s_insert_prev_name));
+    if (after_index > 0) {
+        job_lock();
+        const record_t *recs = job_get_records();
+        uint32_t cnt = job_get_count();
+        for (uint32_t i = 0; i < cnt; i++) {
+            if (recs[i].index == after_index && recs[i].valid) {
+                strncpy(s_insert_prev_name, recs[i].name, MAX_POINT_NAME - 1);
+                break;
+            }
+        }
+        job_unlock();
+    }
+
+    job_delete_setup(setup_no);
+
+    s_insert_mode       = true;
+    s_insert_after      = after_index;
+    s_insert_after_base = after_index;
+    s_insert_setup_no   = setup_no;
+    memset(s_insert_fs1_name, 0, sizeof(s_insert_fs1_name));
+
+    s_next_sight = SIGHT_BS;
+    dblr_reset();
+    int method = s_settings.obs_method;
+    s_dblr.step = (method >= 1 && method <= 3) ? DBLR_BS1 : DBLR_IDLE;
+
+    ESP_LOGI(TAG, "Re-measure: deleted setup_no=%lu insert_after=%lu new_sno=%lu prev_name=%s",
+             (unsigned long)setup_no, (unsigned long)after_index,
+             (unsigned long)s_insert_setup_no, s_insert_prev_name);
+    send_ok(req);
+    return ESP_OK;
+}
+
+// ─── POST /api/insert_cancel ──────────────────────────────────────────────────
+static esp_err_t h_insert_cancel(httpd_req_t *req)
+{
+    s_insert_mode = false;
+    s_insert_after = 0;
+    memset(s_insert_prev_name, 0, sizeof(s_insert_prev_name));
+    dblr_reset();
+    int method = s_settings.obs_method;
+    s_dblr.step = (method >= 1 && method <= 3) ? DBLR_BS1 : DBLR_IDLE;
+    s_next_sight = SIGHT_BS;
+    ESP_LOGI(TAG, "Insert mode cancelled");
+    send_ok(req);
+    return ESP_OK;
+}
+
 // ─── Start server ─────────────────────────────────────────────────────────────
 esp_err_t web_server_start(void)
 {
@@ -1028,7 +1178,7 @@ esp_err_t web_server_start(void)
     wifi_init();
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 26;
+    cfg.max_uri_handlers = 28;
     cfg.stack_size = 24576;
     cfg.send_wait_timeout = 30;
     cfg.recv_wait_timeout = 30;
@@ -1060,11 +1210,13 @@ esp_err_t web_server_start(void)
         { "/api/record/name",   HTTP_POST, h_rec_name,      NULL },
         { "/api/settings",      HTTP_POST, h_settings_post, NULL },
         { "/api/files",         HTTP_GET,  h_files,         NULL },
-        { "/api/dblr_repeat",   HTTP_POST, h_dblr_repeat,   NULL },
-        { "/api/clear_setup",   HTTP_POST, h_clear_setup,   NULL },
-        { "/api/import",        HTTP_POST, h_import,        NULL },
+        { "/api/dblr_repeat",      HTTP_POST, h_dblr_repeat,      NULL },
+        { "/api/clear_setup",      HTTP_POST, h_clear_setup,      NULL },
+        { "/api/import",           HTTP_POST, h_import,           NULL },
+        { "/api/remeasure_setup",  HTTP_POST, h_remeasure_setup,  NULL },
+        { "/api/insert_cancel",    HTTP_POST, h_insert_cancel,    NULL },
     };
-    for (int i = 0; i < 24; i++)
+    for (int i = 0; i < 26; i++)
         httpd_register_uri_handler(s_httpd, &uris[i]);
 
     ESP_LOGI(TAG, "HTTP ready at http://%s", WIFI_AP_IP);
