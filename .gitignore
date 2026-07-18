@@ -3,3 +3,4 @@ build/
 sdkconfig
 *.pyc
 __pycache__/
+spiffs_dump.bin

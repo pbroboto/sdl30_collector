@@ -734,7 +734,7 @@ static esp_err_t h_download_m5(httpd_req_t *req)
     }
 
     char disp[64];
-    snprintf(disp, sizeof(disp), "attachment; filename=\"%s.m5\"", jobname);
+    snprintf(disp, sizeof(disp), "attachment; filename=\"%s.dat\"", jobname);
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_set_hdr(req, "Content-Disposition", disp);
 

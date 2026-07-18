@@ -237,7 +237,7 @@ static const char WEB_UI_HTML[] =
 "<div class='row'><span class='lbl'>Points</span><span class='val' id='j-pts'>0</span></div>"
 "<div class='btn-row'>"
 "<button class='btn-sm btn-success' onclick='downloadCSV()'>CSV</button>"
-"<button class='btn-sm btn-success' onclick='downloadM5()'>M5/Zeiss</button>"
+"<button class='btn-sm btn-success' onclick='downloadM5()'>DiNi/DAT</button>"
 "</div>"
 "</div>"
 "<div class='card'>"

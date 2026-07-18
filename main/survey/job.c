@@ -547,41 +547,128 @@ esp_err_t job_edit_name(uint32_t index, const char *name)
         }
     }
 
-    // Sync the paired record: BS1↔BS2, FS1↔FS2.
-    // Search positionally (not by setup_no) so it works even when setup_no numbering
-    // is off due to old firmware data mixed with new.
+    /*
+     * Propagate the name to all records that refer to the same physical point:
+     *
+     *   FS1_N / FS2_N  ──► FS2_N / FS1_N  (within-setup pair)
+     *                  ──► BS1_{N+1} / BS2_{N+1}  (same TP, next setup rear)
+     *
+     *   BS1_N / BS2_N  ──► BS2_N / BS1_N  (within-setup pair)
+     *                  ──► FS1_{N-1} / FS2_{N-1}  (same TP, previous setup fwd)
+     *
+     *   BF FS  ──► next BS     BF BS  ──► previous FS
+     *
+     * Search is positional, not by setup_no, so it works on old CSV data.
+     */
     if (ret == ESP_OK) {
-        sight_type_t pair_sight = SIGHT_BS;
-        bool forward = false;  // search direction from edited_pos
-        bool has_pair = true;
+
+#define SYNC(j) do { strncpy(s_records[j].name, name, MAX_POINT_NAME-1); \
+                     s_records[j].name[MAX_POINT_NAME-1] = '\0'; } while(0)
+
         switch (edited_sight) {
-            case SIGHT_BS1: pair_sight = SIGHT_BS2; forward = true;  break;
-            case SIGHT_BS2: pair_sight = SIGHT_BS1; forward = false; break;
-            case SIGHT_FS1: pair_sight = SIGHT_FS2; forward = true;  break;
-            case SIGHT_FS2: pair_sight = SIGHT_FS1; forward = false; break;
-            default: has_pair = false; break;
-        }
-        if (has_pair) {
-            if (forward) {
-                for (uint32_t i = edited_pos + 1; i < s_count; i++) {
-                    if (s_records[i].valid && !s_records[i].voided &&
-                        s_records[i].sight == pair_sight) {
-                        strncpy(s_records[i].name, name, MAX_POINT_NAME-1);
-                        s_records[i].name[MAX_POINT_NAME-1] = '\0';
-                        break;
-                    }
-                }
-            } else {
+
+        /* ── BFFB BS1: sync BS2 forward, then prev-setup FS2+FS1 backward ── */
+        case SIGHT_BS1:
+            for (uint32_t i = edited_pos + 1; i < s_count; i++) {
+                if (!s_records[i].valid || s_records[i].voided) continue;
+                if (s_records[i].sight == SIGHT_BS2) { SYNC(i); break; }
+                if (s_records[i].sight == SIGHT_BS1) break;
+            }
+            {
+                bool skipped_bs2 = false;
                 for (int i = (int)edited_pos - 1; i >= 0; i--) {
-                    if (s_records[i].valid && !s_records[i].voided &&
-                        s_records[i].sight == pair_sight) {
-                        strncpy(s_records[i].name, name, MAX_POINT_NAME-1);
-                        s_records[i].name[MAX_POINT_NAME-1] = '\0';
-                        break;
-                    }
+                    if (!s_records[i].valid || s_records[i].voided) continue;
+                    sight_type_t sv = s_records[i].sight;
+                    if (!skipped_bs2 && sv == SIGHT_BS2) { skipped_bs2 = true; continue; }
+                    if (sv == SIGHT_FS2) { SYNC(i); continue; }
+                    if (sv == SIGHT_FS1) { SYNC(i); break; }
+                    if (sv == SIGHT_BS1) break;
                 }
             }
+            break;
+
+        /* ── BFFB BS2: sync BS1 backward, then prev-setup FS2+FS1 backward ── */
+        case SIGHT_BS2: {
+            uint32_t bs1_pos = UINT32_MAX;
+            for (int i = (int)edited_pos - 1; i >= 0; i--) {
+                if (!s_records[i].valid || s_records[i].voided) continue;
+                if (s_records[i].sight == SIGHT_BS1) { SYNC(i); bs1_pos = (uint32_t)i; break; }
+            }
+            if (bs1_pos != UINT32_MAX) {
+                bool skipped_bs2 = false;
+                for (int i = (int)bs1_pos - 1; i >= 0; i--) {
+                    if (!s_records[i].valid || s_records[i].voided) continue;
+                    sight_type_t sv = s_records[i].sight;
+                    if (!skipped_bs2 && sv == SIGHT_BS2) { skipped_bs2 = true; continue; }
+                    if (sv == SIGHT_FS2) { SYNC(i); continue; }
+                    if (sv == SIGHT_FS1) { SYNC(i); break; }
+                    if (sv == SIGHT_BS1) break;
+                }
+            }
+            break;
         }
+
+        /* ── BFFB FS1: sync FS2 forward, then next-setup BS1+BS2 forward ── */
+        case SIGHT_FS1:
+            for (uint32_t i = edited_pos + 1; i < s_count; i++) {
+                if (!s_records[i].valid || s_records[i].voided) continue;
+                if (s_records[i].sight == SIGHT_FS2) { SYNC(i); break; }
+                if (s_records[i].sight == SIGHT_FS1) break;
+            }
+            {
+                bool past_bs2 = false, found_bs1 = false;
+                for (uint32_t i = edited_pos + 1; i < s_count; i++) {
+                    if (!s_records[i].valid || s_records[i].voided) continue;
+                    sight_type_t sv = s_records[i].sight;
+                    if (!past_bs2 && sv == SIGHT_BS2) { past_bs2 = true; continue; }
+                    if (past_bs2 && !found_bs1 && sv == SIGHT_BS1) { SYNC(i); found_bs1 = true; continue; }
+                    if (found_bs1 && sv == SIGHT_BS2) { SYNC(i); break; }
+                    if (found_bs1 && sv == SIGHT_BS1) break;
+                }
+            }
+            break;
+
+        /* ── BFFB FS2: sync FS1 backward, then next-setup BS1+BS2 forward ── */
+        case SIGHT_FS2:
+            for (int i = (int)edited_pos - 1; i >= 0; i--) {
+                if (!s_records[i].valid || s_records[i].voided) continue;
+                if (s_records[i].sight == SIGHT_FS1) { SYNC(i); break; }
+                if (s_records[i].sight == SIGHT_FS2) break;
+            }
+            {
+                bool past_bs2 = false, found_bs1 = false;
+                for (uint32_t i = edited_pos + 1; i < s_count; i++) {
+                    if (!s_records[i].valid || s_records[i].voided) continue;
+                    sight_type_t sv = s_records[i].sight;
+                    if (!past_bs2 && sv == SIGHT_BS2) { past_bs2 = true; continue; }
+                    if (past_bs2 && !found_bs1 && sv == SIGHT_BS1) { SYNC(i); found_bs1 = true; continue; }
+                    if (found_bs1 && sv == SIGHT_BS2) { SYNC(i); break; }
+                    if (found_bs1 && sv == SIGHT_BS1) break;
+                }
+            }
+            break;
+
+        /* ── BF BS: sync previous FS ─────────────────────────────────────── */
+        case SIGHT_BS:
+            for (int i = (int)edited_pos - 1; i >= 0; i--) {
+                if (!s_records[i].valid || s_records[i].voided) continue;
+                if (s_records[i].sight == SIGHT_FS) { SYNC(i); break; }
+                if (s_records[i].sight == SIGHT_BS) break;
+            }
+            break;
+
+        /* ── BF FS: sync next BS ─────────────────────────────────────────── */
+        case SIGHT_FS:
+            for (uint32_t i = edited_pos + 1; i < s_count; i++) {
+                if (!s_records[i].valid || s_records[i].voided) continue;
+                if (s_records[i].sight == SIGHT_BS) { SYNC(i); break; }
+                if (s_records[i].sight == SIGHT_FS) break;
+            }
+            break;
+
+        default: break;
+        }
+#undef SYNC
     }
 
     xSemaphoreGive(s_mtx);

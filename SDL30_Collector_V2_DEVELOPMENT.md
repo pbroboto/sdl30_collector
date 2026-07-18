@@ -255,7 +255,7 @@ main/
 
 **Web UI (5-tab SPA):**
 - Measure (live reading + method-specific UI)
-- Records (scrollable table with name/note edit; CSV + M5/Zeiss download)
+- Records (scrollable table with name/note edit; CSV + DiNi/DAT download)
 - Jobs (switch/create/delete/download CSV)
 - Report (closed-loop misclosure; CSV and HTML report export)
 - Settings (method, limits, baud)
@@ -312,57 +312,91 @@ mean_RL = prev_RL + (bs_mean − fs_mean)
 
 ---
 
-## M5 (Zeiss/DiNi) Format Export
+## M5 (DiNi) Format Export
+
+Output file extension is `.dat` (matches real DiNi output). Web UI button
+labelled **DiNi/DAT**.
 
 ### Line Structure (121 bytes per line)
 
 ```
-For M5|Adr    N|INFO_BLOCK            |BLOCK3                |BLOCK4                |BLOCK5                |
+For M5|Adr     N|INFO_BLOCK            |BLOCK3                |BLOCK4                |BLOCK5                |
 ```
 
-- `INFO_BLOCK` — 27 chars: `PNo(8) + Code(5) + 6sp + Sno(4) + Zno(4)` for KD1 measurement
-- Each data block — 22 chars: `%-2s %14.4f %-4s` (label, value, unit `m   `)
-- `M5_EMPTY` — 22 chars of spaces when block is unused
+- Address field — 6 digits (`%6lu`)
+- `INFO_BLOCK` — 27 chars, varies by record type (see below — **no Code field**)
+- Each data block — 22 chars: `%-2s %14.5f %-4s` (label, value, unit `m   `)
+- `M5_EMPTY` — 22 spaces when block is unused
+
+### Info Block Formats (27 chars each)
+
+| Record | Format |
+|--------|--------|
+| KD1 measurement | `PNo(8) + 14sp + Sno(1) + 3sp + Zno(1)` |
+| KD1 Z / Sh record | `PNo(8) + 18sp + Zno(1)` |
+| KD2 closing | `PNo(8) + 7sp + setups(2) + 9sp + Zno(1)` |
+| TO text | `keyword(10) + 7sp + method(4) + 5sp + Zno(1)` |
+
+> **No Code field.** Early versions included a 5-char Code field (bytes 8–12).
+> Real DiNi files have no Code — TBC rejects the entire file if Code is present.
 
 ### Record Types
 
 | Type | Description |
 |------|-------------|
-| `TO  Start-Line` | File header — address 1 |
-| `KD1 PNo Code Sno Zno` | Measurement — Rb (BS), Rf (FS), Z (elevation) |
-| `KD2 PNo Code setups Db Df Z` | Closing record — total distances, final elevation |
+| `TO  <jobname>.dat` | Job filename — address 1, always first |
+| `TO  Start-Line` | Method header (`BF` or `BFFB`) |
+| `KD1 ... Z  <BM_RL>` | Opening BM elevation |
+| `KD1 ... Rb HD` | Backsight measurement (BS, BS1, BS2) |
+| `KD1 ... Rf HD` | Foresight measurement (FS, FS1, FS2) |
+| `KD1 ... Z  <RL>` | Computed elevation (after FS for BF; after BS2 for BFFB) |
+| `TO  <note>` | Field note (optional, after any measurement) |
+| `TO  Cont-Line` | Method change between setups |
+| `KD1 ... Sh dz Z` | Height diff + closure error + known RL (before KD2) |
+| `KD2 ... Db Df Z` | Closing record — setup count, total distances, final RL |
 | `TO  End-Line` | File footer |
 
-### BF Output Sequence (per setup)
+### BF Output Sequence
 
 ```
-KD1  ...  Z  <BM_elevation>          ← first setup only (opening BM)
-KD1  ...  Rb <BS_staff>  HD <BS_dist>
-KD1  ...  Rf <FS_staff>  HD <FS_dist>
-KD1  ...  Z  <computed_RL>
+TO   <jobname>.dat
+TO   Start-Line  BF
+KD1  BM  Z  <BM_elevation>
+KD1  BS  Rb <BS_staff>  HD <BS_dist>
+KD1  FS  Rf <FS_staff>  HD <FS_dist>
+KD1  FS  Z  <computed_RL>
+  ... (repeat per setup)
+KD1  BM  Sh <dH>  dz <closure>  Z  <BM_RL>
+KD2  BM  Db <total_BS_dist>  Df <total_FS_dist>  Z  <final_RL>
+TO   End-Line
 ```
 
-### BFFB Output Sequence (per setup)
+### BFFB Output Sequence
 
 ```
-KD1  ...  Z  <BM_elevation>          ← first setup only
-KD1  ...  Rb <BS1_staff> HD <BS1_dist>
-KD1  ...  Rf <FS1_staff> HD <FS1_dist>
-KD1  ...  Rf <FS2_staff> HD <FS2_dist>
-KD1  ...  Rb <BS2_staff> HD <BS2_dist>
-KD1  ...  Z  <mean_RL>               ← after BS2, uses mean RL not sinking-check RL
+TO   <jobname>.dat
+TO   Start-Line  BFFB
+KD1  BM  Z  <BM_elevation>
+KD1  BS1 Rb <BS1_staff> HD <BS1_dist>    ← Backsight column
+KD1  FS1 Rf <FS1_staff> HD <FS1_dist>    ← Foresight column
+KD1  FS2 Rf <FS2_staff> HD <FS2_dist>    ← Foresight column
+KD1  BS2 Rb <BS2_staff> HD <BS2_dist>    ← Backsight column
+KD1  TP  Z  <mean_RL>                    ← mean RL, after BS2
+  ... (repeat per setup)
+KD1  BM  Sh <dH>  dz <closure>  Z  <BM_RL>
+KD2  BM  Db <total_BS_dist>  Df <total_FS_dist>  Z  <final_RL>
+TO   End-Line
 ```
 
-### KD2 Closing Record
-
-```
-KD2  LastPoint  Code  Nsetups  |Db <total_BS_dist>|Df <total_FS_dist>|Z <final_RL>|
-```
+> **BFFB column placement (confirmed against DiNi Level Editor):**
+> BS1 and BS2 → `Rb` (Backsight column); FS1 and FS2 → `Rf` (Foresight column).
+> This matches how Trimble Business Center / DiNi Level Editor displays the run.
 
 ### Float Precision
 
-Values formatted as `%14.4f` (4 decimal places). Using 6dp causes visible
-float arithmetic noise in the LSB (e.g., `266.390015` instead of `266.3900`).
+Values formatted as `%14.5f` (5 decimal places = 0.01mm). Earlier versions
+used 4dp; 5dp matches real DiNi `.dat` files and avoids visible rounding at
+the 0.1mm level.
 
 ---
 
@@ -516,6 +550,8 @@ On Android, the fixed bottom nav bar overlapped the last visible row.
 19. **DiNi `#####` is in the code field, not the name field** — the 5-char code field (info27 bytes 8–12) holds the rejection marker; the 8-char name field is always clean
 20. **USB-C power negotiation fails with boost converters** — connect boost converter Vout+ directly to the 5V pin on the expansion board; avoid USB-A→USB-C which requires replug to negotiate
 21. **Thin battery wires cause intermittent cutoff under load** — voltage drop across a loose or thin wire triggers the battery protection circuit; use ≥22 AWG for all battery connections
+22. **DiNi info block has no Code field** — real `.dat` files use `PNo(8) + 14sp + Sno(1) + 3sp + Zno(1)`; a 5-char Code field at bytes 8–12 causes TBC to reject the entire file
+23. **BFFB column placement: BS→Rb, FS→Rf** — verified against DiNi Level Editor: BS1/BS2 go in the Backsight (Rb) column, FS1/FS2 in the Foresight (Rf) column; this is how TBC displays and processes the run
 
 ---
 
@@ -549,8 +585,6 @@ All planned V2 features implemented and field-verified.
 - **`setup_no` in pre-fix CSVs**: Jobs recorded before the setup_no fix show
   wrong setup numbers in KD2 count. Staff readings are ground truth; RL is
   unaffected. New jobs are correct.
-- **`Sh` summary record**: Real DiNi emits a total ΔH + misclosure record
-  before KD2. Our exporter omits it. TBC imports correctly without it.
 
 ---
 
@@ -596,6 +630,8 @@ re-measurement that follows is used.
 ## Git History
 
 ```
+771512d Feat: re-measure and mid-survey setup insertion
+9b28a15 Docs: update V2 log — WROOM-32 deployment, battery pack, tools
 f3fb325 Feat: M5-to-CSV converter tool and airport survey example
 c827d90 Fix: format SPIFFS on first boot after erase-flash
 8fbef7d Feat: LEDs working on ESP32-WROOM-32 (temporary while S3 GPIO investigated)

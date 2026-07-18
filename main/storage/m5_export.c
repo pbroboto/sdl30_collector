@@ -4,15 +4,15 @@
  * Confirmed field structure from real DiNi files:
  *
  * KD1 measurement:
- *   PNo(%8s) + Code(%5s) + 6spaces + Sno(%4d) + Zno(%4d) = 27
- *   Sno = number of measurements per reading (always 1 for SDL30)
+ *   PNo(%8.8s) + 14sp + Sno(1) + 3sp + Zno(1) = 27
+ *   Sno = number of measurements (always 1 for SDL30)
  *   Zno = line/section number (always 1 for SDL30 Collector)
  *
- * KD1 Z record (computed elevation, no Sno):
- *   PNo(%8s) + Code(%5s) + Zno(%14d) = 27
+ * KD1 Z/Sh record (computed elevation):
+ *   PNo(%8.8s) + 18sp + Zno(1) = 27
  *
  * KD2 closing:
- *   PNo(%8s) + Code(%5s) + setup_count(%4d) + Zno(%10d) = 27
+ *   PNo(%8.8s) + 7sp + setup_count(%2d) + 9sp + Zno(1) = 27
  *
  * TO text record:
  *   %-10.10s + 9spaces + %-4.4s(method) + %4d(zno) = 27
@@ -38,50 +38,30 @@ static const char *TAG = "M5";
 #define M5_SNO    1                         /* SDL30: always 1 measurement      */
 #define M5_ZNO    1                         /* SDL30 Collector: always line 1   */
 
-/* ── Name → PNo (right-just in 8) + Code (right-just in 5) ──────────────── */
-static void name_to_pno_code(const char *name, char pno[9], char code[6])
-{
-    snprintf(pno, 9, "%8.8s", name);
-
-    const char *c = "";
-    if      (strncmp(name, "BM",  2) == 0) c = "BM";
-    else if (strncmp(name, "TP",  2) == 0) c = "TP";
-    else if (strncmp(name, "IS",  2) == 0) c = "IS";
-    else if (strncmp(name, "CBM", 3) == 0) c = "CBM";
-
-    snprintf(code, 6, "%5s", c);
-}
-
 /* ── Info block builders ─────────────────────────────────────────────────── */
 
-/* KD1 measurement: PNo(8)+Code(5)+6sp+Sno(4)+Zno(4) = 27 */
+/* KD1 measurement: PNo(8)+14sp+Sno(1)+3sp+Zno(1) = 27 */
 static void make_info_meas(char buf[28], const char *name)
 {
-    char pno[9], code[6];
-    name_to_pno_code(name, pno, code);
-    snprintf(buf, 28, "%8s%5s      %4d%4d", pno, code, M5_SNO, M5_ZNO);
+    snprintf(buf, 28, "%8.8s              %1d   %1d", name, M5_SNO, M5_ZNO);
 }
 
-/* KD1 Z record: PNo(8)+Code(5)+Zno(14) = 27 */
+/* KD1 Z/Sh record: PNo(8)+18sp+Zno(1) = 27 */
 static void make_info_z(char buf[28], const char *name)
 {
-    char pno[9], code[6];
-    name_to_pno_code(name, pno, code);
-    snprintf(buf, 28, "%8s%5s%14d", pno, code, M5_ZNO);
+    snprintf(buf, 28, "%8.8s%19d", name, M5_ZNO);
 }
 
-/* KD2 closing: PNo(8)+Code(5)+setups(4)+Zno(10) = 27 */
+/* KD2 closing: PNo(8)+7sp+setups(2)+9sp+Zno(1) = 27 */
 static void make_info_kd2(char buf[28], const char *name, int setup_count)
 {
-    char pno[9], code[6];
-    name_to_pno_code(name, pno, code);
-    snprintf(buf, 28, "%8s%5s%4d%10d", pno, code, setup_count, M5_ZNO);
+    snprintf(buf, 28, "%8.8s       %2d         1", name, setup_count);
 }
 
 /* TO text: %-10.10s + 9sp + %-4.4s(method) + %4d(zno) = 27 */
 static void make_info_to(char buf[28], const char *keyword, const char *method)
 {
-    snprintf(buf, 28, "%-10.10s         %-4.4s%4d",
+    snprintf(buf, 28, "%-10.10s       %-4.4s     %1d",
              keyword,
              method ? method : "",
              M5_ZNO);
@@ -102,16 +82,16 @@ static void write_line(FILE *f, uint32_t *addr,
 {
     char b3[23], b4[23], b5[23];
 
-    if (t3) snprintf(b3, sizeof(b3), "%-2s %14.4f %-4s", t3, v3, M5_M);
+    if (t3) snprintf(b3, sizeof(b3), "%-2s %14.5f %-4s", t3, v3, M5_M);
     else    strncpy(b3, M5_EMPTY, sizeof(b3));
 
-    if (t4) snprintf(b4, sizeof(b4), "%-2s %14.4f %-4s", t4, v4, M5_M);
+    if (t4) snprintf(b4, sizeof(b4), "%-2s %14.5f %-4s", t4, v4, M5_M);
     else    strncpy(b4, M5_EMPTY, sizeof(b4));
 
-    if (t5) snprintf(b5, sizeof(b5), "%-2s %14.4f %-4s", t5, v5, M5_M);
+    if (t5) snprintf(b5, sizeof(b5), "%-2s %14.5f %-4s", t5, v5, M5_M);
     else    strncpy(b5, M5_EMPTY, sizeof(b5));
 
-    fprintf(f, "For M5|Adr%5lu|%-3s %-27s|%s|%s|%s| \r\n",
+    fprintf(f, "For M5|Adr%6lu|%-3s %-27s|%s|%s|%s| \r\n",
             (unsigned long)(*addr)++,
             type2, info, b3, b4, b5);
 }
@@ -204,6 +184,12 @@ int m5_export_job(FILE *f,
 
     ESP_LOGI(TAG, "M5 export: job=%s  count=%lu  bench=%.4f  method=%s",
              job_name, (unsigned long)count, bench_rl, line_method);
+
+    /* TO: Job name — filename with .dat extension, before Start-Line */
+    char job_dat[MAX_JOB_NAME + 5];
+    snprintf(job_dat, sizeof(job_dat), "%s.dat", job_name);
+    snprintf(info, sizeof(info), "%-27.27s", job_dat);
+    write_line(f, &addr, "TO ", info, NULL,0, NULL,0, NULL,0);
 
     /* TO: Start-Line */
     make_info_to(info, "Start-Line", line_method);
@@ -380,6 +366,12 @@ int m5_export_job(FILE *f,
             break;
         }
     }
+
+    /* Sh/dz/Z closing record — height diff, closure error, known RL. */
+    float sh = closing_rl - bench_rl;
+    float dz = bench_rl - closing_rl;
+    make_info_z(info, closing_name);
+    write_line(f, &addr, "KD1", info, "Sh", sh, "dz", dz, "Z ", bench_rl);
 
     make_info_kd2(info, closing_name, (int)setup_no);  /* setup_no = last r->setup_no */
     write_line(f, &addr, "KD2", info,
