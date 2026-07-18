@@ -1,4 +1,6 @@
-# SDL30 Collector V2 — Development Log (ESP32-S3-N16)
+# SDL30 Collector
+
+ESP32-S3 wireless data collector for the Sokkia SDL30 digital level. Development log (V2, ESP32-S3-N16).
 
 ## Overview
 
